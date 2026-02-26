@@ -10,5 +10,9 @@ venv/
 # OS
 .DS_Store
 
+# Reference docs
+HMC8012_SCPI_Reference.md
+HMC8012_user_manual.md
+
 # Runtime output
 result.txt

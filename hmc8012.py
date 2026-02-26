@@ -41,6 +41,17 @@ class HMC8012:
         "diod": ("CONF:DIOD",     False),
     }
 
+    # Maps function names to SENSe SCPI prefix for standalone range control
+    RANGE_SCPI_MAP = {
+        "dcv":  "VOLT:DC:RANGE",
+        "acv":  "VOLT:AC:RANGE",
+        "dci":  "CURR:DC:RANGE",
+        "aci":  "CURR:AC:RANGE",
+        "res":  "RES:RANGE",
+        "fres": "FRES:RANGE",
+        "cap":  "CAP:RANGE",
+    }
+
     def __init__(self, address: str, timeout_ms: int = DEFAULT_TIMEOUT_MS):
         self._resource_string = self._build_resource_string(address)
         self._timeout_ms = timeout_ms
@@ -57,7 +68,7 @@ class HMC8012:
 
     def connect(self) -> None:
         """Open VISA connection, reset instrument, enable remote mode."""
-        self._resource_manager = pyvisa.ResourceManager()
+        self._resource_manager = pyvisa.ResourceManager("@py")
         self._instrument = self._resource_manager.open_resource(
             self._resource_string,
             open_timeout=self._timeout_ms,
@@ -86,22 +97,32 @@ class HMC8012:
                 self._resource_manager.close()
                 self._resource_manager = None
 
+    def reset(self) -> None:
+        """Reset instrument to factory defaults and clear error queue."""
+        self._write("*RST")
+        self._write("*CLS")
+        self._query("*OPC?")
+
     def identify(self) -> str:
         """Return instrument identification string."""
         return self._query("*IDN?")
 
-    def measure(self, function: str) -> float:
+    def measure(self, function: str, range_value: str = "AUTO") -> float:
         """Perform a single measurement for the given function name.
 
         Args:
             function: One of the keys in FUNCTION_MAP
                       (dcv, acv, dci, aci, res, fres, cap, temp, freq, cont, diod).
+            range_value: Range setting — "AUTO" for auto-ranging, or a numeric
+                         string (e.g. "4" for 4V range). Ignored for functions
+                         that don't support range (temp, freq, cont, diod).
 
         Returns:
             The measurement value as a float.
 
         Raises:
-            ValueError: If function name is not recognized.
+            ValueError: If function name is not recognized, or if a non-AUTO
+                        range is passed for a function that doesn't support it.
             RangeOverflowError: If the instrument returns the overflow sentinel.
             ScpiError: If the instrument reports a SCPI error.
         """
@@ -113,8 +134,50 @@ class HMC8012:
             )
 
         scpi_cmd, has_range = self.FUNCTION_MAP[function]
-        config_cmd = f"{scpi_cmd} AUTO" if has_range else scpi_cmd
+
+        if has_range:
+            config_cmd = f"{scpi_cmd} {range_value}"
+        else:
+            if range_value.upper() != "AUTO":
+                raise ValueError(
+                    f"Function '{function}' does not support range selection."
+                )
+            config_cmd = scpi_cmd
+
         return self._execute_measurement(config_cmd)
+
+    def set_range(self, function: str, range_value: str = "AUTO") -> None:
+        """Set measurement range without triggering a measurement.
+
+        Uses SENSe SCPI commands to set range independently of CONFigure.
+        Useful within a single session to pre-configure range before measuring.
+
+        Args:
+            function: One of the keys in RANGE_SCPI_MAP
+                      (dcv, acv, dci, aci, res, fres, cap).
+            range_value: "AUTO" to enable auto-ranging, or a numeric string
+                         for a fixed range (e.g. "4" for 4V).
+
+        Raises:
+            ValueError: If function doesn't support range selection.
+        """
+        function = function.lower()
+        if function not in self.RANGE_SCPI_MAP:
+            valid = ", ".join(sorted(self.RANGE_SCPI_MAP.keys()))
+            raise ValueError(
+                f"Function '{function}' does not support range. "
+                f"Valid: {valid}"
+            )
+
+        prefix = self.RANGE_SCPI_MAP[function]
+
+        if range_value.upper() == "AUTO":
+            self._write(f"{prefix}:AUTO ON")
+        else:
+            self._write(f"{prefix}:AUTO OFF")
+            self._write(f"{prefix} {range_value}")
+
+        self._query("*OPC?")
 
     # -- Private helpers --
 
@@ -186,5 +249,7 @@ class HMC8012:
                 )
             return f"ASRL{port_number}::INSTR"
 
-        # Assume raw VISA resource string
-        return address
+        raise ValueError(
+            f"Invalid address '{address}'. "
+            "Expected an IP address (e.g. 192.168.0.2) or COM port (e.g. COM3)."
+        )
