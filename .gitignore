@@ -1,0 +1,14 @@
+# Claude
+.claude/
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# OS
+.DS_Store
+
+# Runtime output
+result.txt
