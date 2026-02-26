@@ -6,21 +6,22 @@ Tool Python per interfacciarsi con l'HMC8012 Digital Multimeter di Rohde & Schwa
 
 ### Misura
 
+Legge dallo strumento con la funzione e il fondo scala correnti. **Non** riconfigura nulla; usare il comando `range` prima.
+
 ```bat
-python measure.py <address> <function> [delay_seconds] [range]
-hmc.exe <address> <function> [delay_seconds] [range]
+python measure.py <address> <function> [delay_seconds]
+hmc.exe <address> <function> [delay_seconds]
 ```
 
 | Argomento | Descrizione |
-| --- | --- |
+|-|-|
 | `address` | Indirizzo IP (es. `192.168.0.2`) o porta COM (es. `COM3`) |
 | `function` | Tipo di misura (vedi tabella sotto) |
 | `delay_seconds` | Attesa opzionale in secondi prima della misura (default: 0) |
-| `range` | Fondo scala opzionale (default: secondo `DEFAULT_RANGES` in measure.py) |
 
 ### Impostare il Fondo Scala
 
-Pre-configura il fondo scala sullo strumento. Utile per evitare overrange sul display mentre il dispositivo sotto test si sposta verso la posizione di misura.
+Configura funzione e fondo scala sullo strumento. Le impostazioni vengono mantenute fino al prossimo comando `range` o `reset`. La connessione **non** resetta lo strumento.
 
 ```bat
 python measure.py <address> range <function> <value>
@@ -28,9 +29,9 @@ hmc.exe <address> range <function> <value>
 ```
 
 | Argomento | Descrizione |
-| --- | --- |
+|-|-|
 | `function` | dcv, acv, dci, aci, res, fres, cap |
-| `value` | Valore del fondo scala (es. `4` per 4V) oppure `AUTO` |
+| `value` | Fondo scala in unita SI base (es. `2` per 2A, `0.4` per 400mV) oppure `AUTO` |
 
 ### Reset
 
@@ -57,32 +58,46 @@ hmc.exe <address> reset
 | `cont` | Continuità | `CONF:CONT` | — |
 | `diod` | Test diodo | `CONF:DIOD` | — |
 
+### Valori di Fondo Scala (SCPI)
+
+I valori di fondo scala usano le unita SI base (volt, ampere, ohm, farad). Ad esempio, `0.4` = 400mV, `0.02` = 20mA.
+
+| Funzione | Valori di fondo scala | Unita |
+|-|-|-|
+| `dcv` | 0.4, 4, 40, 400, 1000 | V |
+| `acv` | 0.4, 4, 40, 400, 750 | V |
+| `dci` | 0.02, 0.2, 2, 10 | A |
+| `aci` | 0.02, 0.2, 2, 10 | A |
+| `res` | 400, 4e3, 40e3, 400e3, 4e6, 40e6, 2.5e8 | Ohm |
+| `fres` | 400, 4e3, 40e3, 400e3, 4e6 | Ohm |
+| `cap` | 5e-9, 50e-9, 500e-9, 5e-6, 50e-6, 500e-6 | F |
+
 ### Esempi
 
 ```bat
-rem Tensione DC via LAN (fondo scala automatico, da DEFAULT_RANGES)
-python measure.py 192.168.0.2 dcv
-hmc.exe 192.168.0.2 dcv
+rem 1. Reset dello strumento ai valori di fabbrica
+hmc.exe 192.168.0.2 reset
 
-rem Corrente AC via COM, ritardo di 2.5s per il posizionamento
-python measure.py COM3 aci 2.5
-hmc.exe COM3 aci 2.5
+rem 2. Configura corrente DC con fondo scala 2A
+hmc.exe 192.168.0.2 range dci 2
 
-rem Tensione DC con fondo scala fisso 4V, senza ritardo
-python measure.py 192.168.0.2 dcv 0 4
-hmc.exe 192.168.0.2 dcv 0 4
+rem 3. Misura (usa la funzione e il fondo scala configurati)
+hmc.exe 192.168.0.2 dci
 
-rem Corrente DC con fondo scala 200mA, ritardo 1s
-python measure.py COM3 dci 1 0.2
-hmc.exe COM3 dci 1 0.2
+rem 4. Misura con ritardo di 1.5s per il posizionamento
+hmc.exe 192.168.0.2 dci 1.5
 
-rem Impostare fondo scala a 40V prima dello spostamento (persiste fino al prossimo *RST)
-python measure.py 192.168.0.2 range dcv 40
+rem 5. Cambia a tensione DC, fondo scala 40V
 hmc.exe 192.168.0.2 range dcv 40
 
-rem Reset dello strumento
-python measure.py 192.168.0.2 reset
-hmc.exe 192.168.0.2 reset
+rem 6. Misura tensione DC
+hmc.exe 192.168.0.2 dcv
+
+rem 7. Passa a fondo scala automatico per tensione AC
+hmc.exe COM3 range acv AUTO
+
+rem 8. Misura tensione AC
+hmc.exe COM3 acv
 ```
 
 ## Output
@@ -97,7 +112,7 @@ Tutti i messaggi diagnostici vengono inviati a stderr per facilitare il debug.
 
 ## Come Funziona
 
-Lo script si connette al multimetro, attende opzionalmente che il dispositivo sotto test raggiunga la posizione, esegue l'operazione e scrive il risultato in `result.txt`.
+Lo script si connette al multimetro (senza resettarlo), attende il delay di posizionamento se specificato, invia `READ?` e scrive il risultato in `result.txt`. Funzione e fondo scala si configurano separatamente con il comando `range` e vengono mantenuti tra le chiamate.
 
 ### Flusso di Sistema (Misura)
 
@@ -108,22 +123,20 @@ sequenceDiagram
     participant DRV as hmc8012.py
     participant DMM as HMC8012
 
-    HOST->>PY: Avvia measure.py / hmc.exe <addr> <func> [delay] [range]
+    HOST->>PY: Avvia measure.py / hmc.exe <addr> <func> [delay]
     Note over HOST: Continua immediatamente (non-blocking)
     HOST->>HOST: Sposta il dispositivo sotto test
 
     PY->>DRV: HMC8012(address)
     DRV->>DMM: Connect (LAN o COM)
-    DRV->>DMM: *RST / *CLS / SYSTem:REMote
+    DRV->>DMM: *CLS / SYSTem:REMote
 
     alt delay > 0
         PY->>PY: time.sleep(delay)
         Note over PY: Il dispositivo si sta posizionando
     end
 
-    PY->>DRV: measure(function, range)
-    DRV->>DMM: CONF:<FUNC> <RANGE>
-    DRV->>DMM: *OPC? (attende il completamento)
+    PY->>DRV: measure()
     DRV->>DMM: READ? (trigger + lettura)
     DMM-->>DRV: valore di misura
     DRV->>DMM: SYST:ERR? (verifica errori)
@@ -151,9 +164,10 @@ sequenceDiagram
 
     PY->>DRV: HMC8012(address)
     DRV->>DMM: Connect (LAN o COM)
-    DRV->>DMM: *RST / *CLS / SYSTem:REMote
+    DRV->>DMM: *CLS / SYSTem:REMote
 
     PY->>DRV: set_range(function, value)
+    DRV->>DMM: CONF:<FUNC> (seleziona funzione)
     DRV->>DMM: <FUNC>:RANGE:AUTO OFF
     DRV->>DMM: <FUNC>:RANGE <value>
     DRV->>DMM: *OPC?
@@ -161,7 +175,7 @@ sequenceDiagram
     PY->>DRV: close()
     DRV->>DMM: SYSTem:LOCal (rilascia il pannello)
 
-    Note over DMM: Il fondo scala persiste fino al prossimo *RST
+    Note over DMM: Funzione + fondo scala persistono fino al prossimo range/reset
     PY->>PY: Scrive OK in result.txt
 ```
 
@@ -170,22 +184,20 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     A[Parse CLI args] --> B[Connect to HMC8012]
-    B --> C[*RST + *CLS + SYSTem:REMote]
+    B --> C[*CLS + SYSTem:REMote]
     C --> D{delay > 0?}
     D -- sì --> E[time.sleep delay]
     D -- no --> F
-    E --> F["CONF:FUNC RANGE (da arg o DEFAULT_RANGES)"]
-    F --> G[*OPC? wait]
-    G --> H[READ? trigger+read]
-    H --> I{overflow sentinel?}
-    I -- sì --> ERR[Scrive ERR in result.txt]
-    I -- no --> J[SYST:ERR? check]
-    J --> K{SCPI error?}
-    K -- sì --> ERR
-    K -- no --> L[SYSTem:LOCal + close]
-    L --> M[Scrive il valore in result.txt]
+    E --> F[READ? trigger+read]
+    F --> G{overflow sentinel?}
+    G -- sì --> ERR[Scrive ERR in result.txt]
+    G -- no --> H[SYST:ERR? check]
+    H --> I{SCPI error?}
+    I -- sì --> ERR
+    I -- no --> J[SYSTem:LOCal + close]
+    J --> K[Scrive il valore in result.txt]
 
-    D -.->|connessione fallita| ERR
+    B -.->|connessione fallita| ERR
 ```
 
 ### Rilevamento Connessione
@@ -215,7 +227,7 @@ flowchart LR
 | Classe | Descrizione |
 | --- | --- |
 | `ScpiError` | Sollevata quando lo strumento riporta un errore SCPI (risposta non zero a `SYST:ERR?`). |
-| `RangeOverflowError` | Sollevata quando lo strumento restituisce il valore sentinella di overflow (`9.9e+37`), indicando che l'ingresso ha superato il fondo scala selezionato. |
+| `RangeOverflowError` | Sollevata quando lo strumento restituisce il valore sentinella di overflow (`9.9e+37`): l'ingresso ha superato il fondo scala selezionato. |
 
 #### `HMC8012`
 
@@ -232,30 +244,30 @@ Classe driver per l'R&S HMC8012. Supporta i trasporti LAN (socket TCPIP) e COM (
 
 ##### Mappe
 
-`FUNCTION_MAP: dict[str, tuple[str, bool]]`
+`FUNCTION_SCPI_MAP: dict[str, str]`
 
-Associa ogni nome di funzione CLI a una tupla `(comando_SCPI_di_configurazione, supporta_range)`. Usata da `measure()` per costruire il comando `CONF:…` e determinare se l'argomento range è applicabile.
+Associa ogni nome di funzione CLI al comando SCPI CONFigure. Usata da `set_range()` per selezionare la funzione di misura.
 
-| Chiave | Comando SCPI | Supporta range |
-| --- | --- | --- |
-| `dcv` | `CONF:VOLT:DC` | sì |
-| `acv` | `CONF:VOLT:AC` | sì |
-| `dci` | `CONF:CURR:DC` | sì |
-| `aci` | `CONF:CURR:AC` | sì |
-| `res` | `CONF:RES` | sì |
-| `fres` | `CONF:FRES` | sì |
-| `cap` | `CONF:CAP` | sì |
-| `temp` | `CONF:TEMP` | no |
-| `freq` | `CONF:FREQ` | no |
-| `cont` | `CONF:CONT` | no |
-| `diod` | `CONF:DIOD` | no |
+| Chiave | Comando SCPI |
+|-|-|
+| `dcv` | `CONF:VOLT:DC` |
+| `acv` | `CONF:VOLT:AC` |
+| `dci` | `CONF:CURR:DC` |
+| `aci` | `CONF:CURR:AC` |
+| `res` | `CONF:RES` |
+| `fres` | `CONF:FRES` |
+| `cap` | `CONF:CAP` |
+| `temp` | `CONF:TEMP` |
+| `freq` | `CONF:FREQ` |
+| `cont` | `CONF:CONT` |
+| `diod` | `CONF:DIOD` |
 
 `RANGE_SCPI_MAP: dict[str, str]`
 
-Associa i nomi delle funzioni al prefisso SCPI SENSe usato da `set_range()` per il controllo autonomo del fondo scala (indipendente da un trigger di misura).
+Associa i nomi delle funzioni al prefisso SCPI SENSe usato da `set_range()` per il controllo del fondo scala.
 
 | Chiave | Prefisso SCPI |
-| --- | --- |
+|-|-|
 | `dcv` | `VOLT:DC:RANGE` |
 | `acv` | `VOLT:AC:RANGE` |
 | `dci` | `CURR:DC:RANGE` |
@@ -267,20 +279,19 @@ Associa i nomi delle funzioni al prefisso SCPI SENSe usato da `set_range()` per 
 ##### Metodi pubblici
 
 | Firma | Descrizione |
-| --- | --- |
+|-|-|
 | `__init__(address, timeout_ms=5000)` | Costruisce la stringa di risorsa VISA da `address` (IP o porta COM). Non apre la connessione. |
-| `connect() → None` | Apre la risorsa VISA, imposta i caratteri di terminazione, invia `*RST`, `*CLS`, `SYSTem:REMote`. Chiamato automaticamente da `__enter__`. |
+| `connect() → None` | Apre la risorsa VISA, imposta i caratteri di terminazione, invia `*CLS`, `SYSTem:REMote`. **Non** resetta lo strumento. Chiamato automaticamente da `__enter__`. |
 | `close() → None` | Svuota la coda errori dello strumento, invia `SYSTem:LOCal` per ripristinare il controllo dal pannello frontale, chiude la risorsa VISA. Chiamato automaticamente da `__exit__`. |
-| `reset() → None` | Invia `*RST`, `*CLS`, poi `*OPC?` per confermare il completamento. |
+| `reset() → None` | Invia `*RST`, `*CLS`, poi `*OPC?` per confermare il completamento. Ripristina i valori di fabbrica. |
 | `identify() → str` | Restituisce la stringa di identificazione `*IDN?` dello strumento. |
-| `measure(function, range_value="AUTO") → float` | Configura la funzione tramite `CONF:…`, attende `*OPC?`, legge con `READ?`, verifica overflow ed errori SCPI, restituisce il valore float. Solleva `ValueError`, `RangeOverflowError` o `ScpiError`. |
-| `set_range(function, range_value="AUTO") → None` | Imposta il fondo scala usando i comandi SENSe senza attivare una misura. Invia `<PREFIX>:AUTO ON/OFF` e opzionalmente `<PREFIX> <value>`, poi attende `*OPC?`. Solleva `ValueError` per funzioni non supportate. |
+| `measure() → float` | Invia `READ?` per leggere con la configurazione corrente. Controlla overflow ed errori SCPI, restituisce il valore float. Solleva `RangeOverflowError` o `ScpiError`. |
+| `set_range(function, range_value="AUTO") → None` | Seleziona la funzione tramite `CONF:…`, poi imposta il fondo scala tramite comandi SENSe. Le impostazioni vengono mantenute fino al prossimo `set_range()` o `reset()`. Solleva `ValueError` per funzioni non supportate. |
 
 ##### Metodi privati
 
 | Firma | Descrizione |
-| --- | --- |
-| `_execute_measurement(config_cmd) → float` | Invia il comando di configurazione, esegue il trigger con `READ?`, analizza il float, verifica il valore sentinella di overflow e gli errori SCPI. |
+|-|-|
 | `_check_errors() → None` | Interroga `SYST:ERR?` una volta; solleva `ScpiError` se il codice di risposta è diverso da zero. |
 | `_drain_error_queue() → None` | Legge `SYST:ERR?` in loop (fino a `MAX_ERROR_QUEUE_DEPTH`) finché la coda non è vuota. Chiamato durante `close()`. |
 | `_write(command) → None` | Invia una stringa di comando SCPI allo strumento. Solleva `ConnectionError` se non connesso. |
@@ -294,39 +305,21 @@ Associa i nomi delle funzioni al prefisso SCPI SENSe usato da `set_range()` per 
 #### Costanti a livello di modulo
 
 | Nome | Valore | Descrizione |
-| --- | --- | --- |
-| `SCRIPT_DIR` | `Path(__file__).resolve().parent` | Directory assoluta dello script, usata per risolvere il percorso di `result.txt`. |
+|-|-|-|
+| `SCRIPT_DIR` | `Path(sys.argv[0]).resolve().parent` | Directory assoluta dello script/eseguibile, usata per risolvere il percorso di `result.txt`. |
 | `DEFAULT_OUTPUT` | `SCRIPT_DIR / "result.txt"` | Percorso default del file di output. |
-| `VALID_FUNCTIONS` | chiavi ordinate di `HMC8012.FUNCTION_MAP` | Tutti i nomi di funzione di misura riconosciuti, usati nei messaggi di utilizzo/errore. |
+| `VALID_FUNCTIONS` | chiavi ordinate di `HMC8012.VALID_FUNCTIONS` | Tutti i nomi di funzione di misura riconosciuti, usati nei messaggi di utilizzo/errore. |
 | `VALID_RANGE_FUNCTIONS` | chiavi ordinate di `HMC8012.RANGE_SCPI_MAP` | Nomi di funzione che supportano la selezione del fondo scala. |
-
-#### `DEFAULT_RANGES`
-
-`DEFAULT_RANGES: dict[str, str]`
-
-Fondo scala default applicato per funzione quando nessun argomento `range` viene fornito da riga di comando. Tutte le voci hanno come default `"AUTO"` (auto-ranging). Modificare un valore con una stringa numerica (es. `"4"` per 4V) per fissare un fondo scala specifico a livello di progetto.
-
-| Chiave | default |
-| --- | --- |
-| `dcv` | `AUTO` |
-| `acv` | `AUTO` |
-| `dci` | `AUTO` |
-| `aci` | `AUTO` |
-| `res` | `AUTO` |
-| `fres` | `AUTO` |
-| `cap` | `AUTO` |
-
-Le funzioni `temp`, `freq`, `cont` e `diod` sono assenti perché non hanno un fondo scala impostabile.
 
 #### Funzioni
 
 | Firma | Descrizione |
-| --- | --- |
+|-|-|
 | `main() → None` | Entry point CLI. Analizza `sys.argv`, smista verso `cmd_measure`, `cmd_range` o `cmd_reset`. Esce con codice 1 per comandi sconosciuti o numero di argomenti errato. |
-| `cmd_measure(address, args) → None` | Gestisce il comando di misura. Estrae funzione, ritardo opzionale e fondo scala opzionale da `args`; apre `HMC8012` come context manager; chiama `dmm.measure()`; scrive il risultato float in `result.txt`. Scrive `ERR` ed esce con codice 1 in caso di eccezione. |
+| `cmd_measure(address, args) → None` | Gestisce il comando di misura. Estrae funzione e ritardo opzionale da `args`; apre `HMC8012` come context manager; chiama `dmm.measure()`; scrive il risultato float in `result.txt`. Scrive `ERR` ed esce con codice 1 in caso di eccezione. |
 | `cmd_range(address, args) → None` | Gestisce il sotto-comando `range`. Valida funzione e valore, chiama `dmm.set_range()`, scrive `OK` in `result.txt`. Scrive `ERR` ed esce con codice 1 in caso di errore. |
-| `cmd_reset(address) → None` | Gestisce il comando `reset`. Apre `HMC8012` (che invia `*RST` alla connessione) e lo chiude immediatamente. Scrive `OK` o `ERR` in `result.txt`. |
-| `write_result(value, output_path=DEFAULT_OUTPUT) → None` | Scrive `value + "\n"` in `output_path`, sovrascrivendo qualsiasi contenuto esistente. È l'unico punto di scrittura per `result.txt`. |
+| `cmd_reset(address) → None` | Gestisce il comando `reset`. Apre `HMC8012` e chiama `dmm.reset()`. Scrive `OK` o `ERR` in `result.txt`. |
+| `write_result(value, output_path=DEFAULT_OUTPUT) → None` | Scrive `value + "\n"` in `output_path`, sovrascrivendo il contenuto esistente. Unico punto di scrittura per `result.txt`. |
 | `_usage_error(message) → None` | Stampa un messaggio di errore e il riepilogo di utilizzo completo su stderr, poi chiama `sys.exit(1)`. |
 
 ## Compilazione dell'Eseguibile Standalone

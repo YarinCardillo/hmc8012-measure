@@ -1,15 +1,14 @@
 """CLI entry point for HMC8012 multimeter operations.
 
 Commands:
-    python measure.py <address> <function> [delay] [range]   Measure
-    python measure.py <address> range <function> <value>      Set range
+    python measure.py <address> <function> [delay]            Measure (READ? only)
+    python measure.py <address> range <function> <value>      Configure function + range
     python measure.py <address> reset                         Reset instrument
 
 Arguments:
     address    IP address (e.g. 192.168.0.2) or COM port (e.g. COM3)
     function   Measurement type: dcv|acv|dci|aci|res|fres|cap|temp|freq|cont|diod
     delay      Optional wait in seconds before measuring (default: 0)
-    range      Measurement range value or AUTO (default: per DEFAULT_RANGES)
 
 Output:
     Measure writes the value (or "ERR") to result.txt in the script directory.
@@ -22,39 +21,20 @@ from pathlib import Path
 
 from hmc8012 import HMC8012
 
-# When compiled with Nuitka --onefile, __file__ resolves to the temp extraction
-# directory rather than the actual executable location. sys.executable always
-# points to the real .exe, so we use it when running as a frozen binary.
-SCRIPT_DIR = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+# sys.argv[0] always points to the actual script/executable being run.
+# This is more reliable than __file__ when compiled with Nuitka (onefile mode),
+# where __file__ resolves to a temp extraction directory instead of the exe location.
+SCRIPT_DIR = Path(sys.argv[0]).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "result.txt"
-VALID_FUNCTIONS = sorted(HMC8012.FUNCTION_MAP.keys())
+VALID_FUNCTIONS = sorted(HMC8012.VALID_FUNCTIONS)
 VALID_RANGE_FUNCTIONS = sorted(HMC8012.RANGE_SCPI_MAP.keys())
-
-# ---------------------------------------------------------------------------
-# Default ranges per function. Change these to lock a fixed range by default.
-# "AUTO" = auto-ranging. For fixed range, use a numeric string matching the
-# instrument's range steps (e.g. "4" for 4V, "0.02" for 20mA).
-#
-# Functions not listed here (temp, freq, cont, diod) have no range setting.
-# ---------------------------------------------------------------------------
-DEFAULT_RANGES: dict[str, str] = {
-    "dcv":  "AUTO",   # 400mV, 4V, 40V, 400V, 1000V
-    "acv":  "AUTO",   # 400mV, 4V, 40V, 400V, 750V
-    "dci":  "AUTO",   # 20mA, 200mA, 2A, 10A
-    "aci":  "AUTO",   # 20mA, 200mA, 2A, 10A
-    "res":  "AUTO",   # 400, 4k, 40k, 400k, 4M, 40M, 250M
-    "fres": "AUTO",   # 400, 4k, 40k, 400k, 4M
-    "cap":  "AUTO",   # 5nF, 50nF, 500nF, 5uF, 50uF, 500uF
-}
-
 
 # -- Command handlers -------------------------------------------------------
 
 def cmd_measure(address: str, args: list[str]) -> None:
-    """Handle: measure.py <address> <function> [delay] [range]"""
+    """Handle: measure.py <address> <function> [delay]"""
     function = args[0]
     delay = 0.0
-    range_value = DEFAULT_RANGES.get(function, "AUTO")
 
     if len(args) >= 2:
         try:
@@ -63,9 +43,6 @@ def cmd_measure(address: str, args: list[str]) -> None:
             _usage_error(f"Delay must be a number, got '{args[1]}'.")
         if delay < 0:
             _usage_error(f"Delay must be >= 0, got {delay}.")
-
-    if len(args) >= 3:
-        range_value = args[2]
 
     try:
         with HMC8012(address) as dmm:
@@ -76,7 +53,7 @@ def cmd_measure(address: str, args: list[str]) -> None:
                 )
                 time.sleep(delay)
 
-            result = dmm.measure(function, range_value)
+            result = dmm.measure()
 
         write_result(str(result))
         print(f"Result: {result}", file=sys.stderr)
@@ -120,8 +97,8 @@ def cmd_range(address: str, args: list[str]) -> None:
 def cmd_reset(address: str) -> None:
     """Handle: measure.py <address> reset"""
     try:
-        with HMC8012(address):
-            pass  # connect() already sends *RST
+        with HMC8012(address) as dmm:
+            dmm.reset()
 
         write_result("OK")
         print("Instrument reset.", file=sys.stderr)
@@ -144,7 +121,7 @@ def _usage_error(message: str) -> None:
     print(f"Error: {message}", file=sys.stderr)
     print(
         "Usage:\n"
-        "  python measure.py <address> <function> [delay] [range]   Measure\n"
+        "  python measure.py <address> <function> [delay]            Measure\n"
         "  python measure.py <address> range <function> <value>      Set range\n"
         "  python measure.py <address> reset                         Reset",
         file=sys.stderr,
@@ -174,7 +151,7 @@ def main() -> None:
     elif command == "range":
         cmd_range(address, args[2:])
 
-    elif command in HMC8012.FUNCTION_MAP:
+    elif command in HMC8012.VALID_FUNCTIONS:
         cmd_measure(address, args[1:])
 
     else:
