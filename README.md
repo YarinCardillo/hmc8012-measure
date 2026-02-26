@@ -337,8 +337,7 @@ To distribute the tool as a self-contained `hmc.exe` (no Python or NI-VISA requi
 
 ```bat
 pip install nuitka pyvisa pyvisa-py pyserial
-python -m nuitka --onefile --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial
-  measure.py
+python -m nuitka --onefile --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial measure.py
 ```
 
 On the first run Nuitka will prompt to download MinGW-w64 if no C compiler is found: answer `yes`.
