@@ -22,7 +22,10 @@ from pathlib import Path
 
 from hmc8012 import HMC8012
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+# When compiled with Nuitka --onefile, __file__ resolves to the temp extraction
+# directory rather than the actual executable location. sys.executable always
+# points to the real .exe, so we use it when running as a frozen binary.
+SCRIPT_DIR = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "result.txt"
 VALID_FUNCTIONS = sorted(HMC8012.FUNCTION_MAP.keys())
 VALID_RANGE_FUNCTIONS = sorted(HMC8012.RANGE_SCPI_MAP.keys())
