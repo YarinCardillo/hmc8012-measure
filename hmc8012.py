@@ -1,7 +1,8 @@
 """Rohde & Schwarz HMC8012 instrument driver over PyVISA.
 
 Supports LAN (TCPIP socket, port 5025) and COM (serial/VCP) connections.
-All measurements follow: CONFigure → *OPC? → READ? → validate → teardown.
+Connection does not reset the instrument — function and range persist across
+invocations. Use reset() explicitly to restore factory defaults.
 """
 
 import logging
@@ -26,19 +27,25 @@ class HMC8012:
     DEFAULT_TIMEOUT_MS = 5000
     MAX_ERROR_QUEUE_DEPTH = 50
 
-    # Maps CLI function names to (SCPI_configure_command, supports_range)
-    FUNCTION_MAP = {
-        "dcv":  ("CONF:VOLT:DC",  True),
-        "acv":  ("CONF:VOLT:AC",  True),
-        "dci":  ("CONF:CURR:DC",  True),
-        "aci":  ("CONF:CURR:AC",  True),
-        "res":  ("CONF:RES",      True),
-        "fres": ("CONF:FRES",     True),
-        "cap":  ("CONF:CAP",      True),
-        "temp": ("CONF:TEMP",     False),
-        "freq": ("CONF:FREQ",     False),
-        "cont": ("CONF:CONT",     False),
-        "diod": ("CONF:DIOD",     False),
+    # Valid CLI function names for measurement
+    VALID_FUNCTIONS = {
+        "dcv", "acv", "dci", "aci", "res", "fres",
+        "cap", "temp", "freq", "cont", "diod",
+    }
+
+    # Maps CLI function names to SCPI CONFigure command (used by set_range)
+    FUNCTION_SCPI_MAP = {
+        "dcv":  "CONF:VOLT:DC",
+        "acv":  "CONF:VOLT:AC",
+        "dci":  "CONF:CURR:DC",
+        "aci":  "CONF:CURR:AC",
+        "res":  "CONF:RES",
+        "fres": "CONF:FRES",
+        "cap":  "CONF:CAP",
+        "temp": "CONF:TEMP",
+        "freq": "CONF:FREQ",
+        "cont": "CONF:CONT",
+        "diod": "CONF:DIOD",
     }
 
     # Maps function names to SENSe SCPI prefix for standalone range control
@@ -67,7 +74,12 @@ class HMC8012:
         return False
 
     def connect(self) -> None:
-        """Open VISA connection, reset instrument, enable remote mode."""
+        """Open VISA connection, clear errors, enable remote mode.
+
+        Does NOT reset the instrument — call reset() explicitly to restore
+        factory defaults. This preserves any previously configured function
+        and range across separate invocations.
+        """
         self._resource_manager = pyvisa.ResourceManager("@py")
         self._instrument = self._resource_manager.open_resource(
             self._resource_string,
@@ -77,7 +89,6 @@ class HMC8012:
         self._instrument.write_termination = "\n"
         self._instrument.timeout = self._timeout_ms
 
-        self._write("*RST")
         self._write("*CLS")
         self._write("SYSTem:REMote")
         identity = self._query("*IDN?")
@@ -107,84 +118,20 @@ class HMC8012:
         """Return instrument identification string."""
         return self._query("*IDN?")
 
-    def measure(self, function: str, range_value: str = "AUTO") -> float:
-        """Perform a single measurement for the given function name.
+    def measure(self) -> float:
+        """Trigger a measurement and return the result.
 
-        Args:
-            function: One of the keys in FUNCTION_MAP
-                      (dcv, acv, dci, aci, res, fres, cap, temp, freq, cont, diod).
-            range_value: Range setting — "AUTO" for auto-ranging, or a numeric
-                         string (e.g. "4" for 4V range). Ignored for functions
-                         that don't support range (temp, freq, cont, diod).
+        Uses whatever function and range are currently configured on the
+        instrument. Call set_range() beforehand to configure, or reset()
+        to restore defaults.
 
         Returns:
             The measurement value as a float.
 
         Raises:
-            ValueError: If function name is not recognized, or if a non-AUTO
-                        range is passed for a function that doesn't support it.
             RangeOverflowError: If the instrument returns the overflow sentinel.
             ScpiError: If the instrument reports a SCPI error.
         """
-        function = function.lower()
-        if function not in self.FUNCTION_MAP:
-            valid = ", ".join(sorted(self.FUNCTION_MAP.keys()))
-            raise ValueError(
-                f"Unknown function '{function}'. Valid: {valid}"
-            )
-
-        scpi_cmd, has_range = self.FUNCTION_MAP[function]
-
-        if has_range:
-            config_cmd = f"{scpi_cmd} {range_value}"
-        else:
-            if range_value.upper() != "AUTO":
-                raise ValueError(
-                    f"Function '{function}' does not support range selection."
-                )
-            config_cmd = scpi_cmd
-
-        return self._execute_measurement(config_cmd)
-
-    def set_range(self, function: str, range_value: str = "AUTO") -> None:
-        """Set measurement range without triggering a measurement.
-
-        Uses SENSe SCPI commands to set range independently of CONFigure.
-        Useful within a single session to pre-configure range before measuring.
-
-        Args:
-            function: One of the keys in RANGE_SCPI_MAP
-                      (dcv, acv, dci, aci, res, fres, cap).
-            range_value: "AUTO" to enable auto-ranging, or a numeric string
-                         for a fixed range (e.g. "4" for 4V).
-
-        Raises:
-            ValueError: If function doesn't support range selection.
-        """
-        function = function.lower()
-        if function not in self.RANGE_SCPI_MAP:
-            valid = ", ".join(sorted(self.RANGE_SCPI_MAP.keys()))
-            raise ValueError(
-                f"Function '{function}' does not support range. "
-                f"Valid: {valid}"
-            )
-
-        prefix = self.RANGE_SCPI_MAP[function]
-
-        if range_value.upper() == "AUTO":
-            self._write(f"{prefix}:AUTO ON")
-        else:
-            self._write(f"{prefix}:AUTO OFF")
-            self._write(f"{prefix} {range_value}")
-
-        self._query("*OPC?")
-
-    # -- Private helpers --
-
-    def _execute_measurement(self, config_cmd: str) -> float:
-        """Send configure command, trigger, read, and validate result."""
-        self._write(config_cmd)
-        self._query("*OPC?")
         raw = self._query("READ?")
         try:
             value = float(raw)
@@ -199,6 +146,45 @@ class HMC8012:
 
         self._check_errors()
         return value
+
+    def set_range(self, function: str, range_value: str = "AUTO") -> None:
+        """Configure measurement function and range without triggering.
+
+        Sends CONFigure to select the function, then sets range via SENSe
+        commands. The configuration persists until the next set_range() or
+        reset() call.
+
+        Args:
+            function: One of the keys in RANGE_SCPI_MAP
+                      (dcv, acv, dci, aci, res, fres, cap).
+            range_value: "AUTO" to enable auto-ranging, or a numeric string
+                         in SI base units (e.g. "2" for 2A, "0.4" for 400mV).
+
+        Raises:
+            ValueError: If function doesn't support range selection.
+        """
+        function = function.lower()
+        if function not in self.RANGE_SCPI_MAP:
+            valid = ", ".join(sorted(self.RANGE_SCPI_MAP.keys()))
+            raise ValueError(
+                f"Function '{function}' does not support range. "
+                f"Valid: {valid}"
+            )
+
+        # Select the measurement function
+        self._write(self.FUNCTION_SCPI_MAP[function])
+
+        # Set range via SENSe commands (survives across READ? calls)
+        prefix = self.RANGE_SCPI_MAP[function]
+        if range_value.upper() == "AUTO":
+            self._write(f"{prefix}:AUTO ON")
+        else:
+            self._write(f"{prefix}:AUTO OFF")
+            self._write(f"{prefix} {range_value}")
+
+        self._query("*OPC?")
+
+    # -- Private helpers --
 
     def _check_errors(self) -> None:
         """Read SYST:ERR? and raise if the instrument reports an error."""
