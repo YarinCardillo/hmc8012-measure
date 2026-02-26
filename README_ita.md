@@ -331,15 +331,13 @@ Le funzioni `temp`, `freq`, `cont` e `diod` sono assenti perché non hanno un fo
 
 ## Compilazione dell'Eseguibile Standalone
 
-Per distribuire il tool come `hmc.exe` autocontenuto (senza Python né NI-VISA sulla macchina target), compilare con Nuitka **su una macchina Windows**:
+Per distribuire il tool come `hmc.exe` autocontenuto (senza Python né NI-VISA sulla macchina target), compilare con Nuitka **su una macchina Windows**.
+
+> **Versione Python:** il compilatore MinGW-w64 bundled di Nuitka non supporta Python 3.13+. Usare **Python 3.12** per compilare.
 
 ```bat
 pip install nuitka pyvisa pyvisa-py pyserial
-python -m nuitka --onefile --output-filename=hmc.exe ^
-  --include-package=pyvisa ^
-  --include-package=pyvisa_py ^
-  --include-package=serial ^
-  measure.py
+python -m nuitka --onefile --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial measure.py
 ```
 
 Al primo avvio Nuitka chiederà di scaricare MinGW-w64 se non trova un compilatore C: rispondere `yes`.
