@@ -1,7 +1,7 @@
 """Rohde & Schwarz HMC8012 instrument driver over PyVISA.
 
 Supports LAN (TCPIP socket, port 5025) and COM (serial/VCP) connections.
-Connection does not reset the instrument — function and range persist across
+Connection does not reset the instrument, function and range persist across
 invocations. Use reset() explicitly to restore factory defaults.
 """
 
@@ -24,7 +24,7 @@ class HMC8012:
 
     OVERFLOW_SENTINEL = 9.90000000E+37
     SCPI_PORT = 5025
-    DEFAULT_TIMEOUT_MS = 5000
+    DEFAULT_TIMEOUT_MS = 8000
     MAX_ERROR_QUEUE_DEPTH = 50
 
     # Valid CLI function names for measurement
@@ -76,23 +76,29 @@ class HMC8012:
     def connect(self) -> None:
         """Open VISA connection, clear errors, enable remote mode.
 
-        Does NOT reset the instrument — call reset() explicitly to restore
+        Does NOT reset the instrument, call reset() explicitly to restore
         factory defaults. This preserves any previously configured function
         and range across separate invocations.
         """
         self._resource_manager = pyvisa.ResourceManager("@py")
-        self._instrument = self._resource_manager.open_resource(
-            self._resource_string,
-            open_timeout=self._timeout_ms,
-        )
-        self._instrument.read_termination = "\n"
-        self._instrument.write_termination = "\n"
-        self._instrument.timeout = self._timeout_ms
+        try:
+            self._instrument = self._resource_manager.open_resource(
+                self._resource_string,
+                open_timeout=self._timeout_ms,
+            )
+            self._instrument.read_termination = "\n"
+            self._instrument.write_termination = "\n"
+            self._instrument.timeout = self._timeout_ms
 
-        self._write("*CLS")
-        self._write("SYSTem:REMote")
-        identity = self._query("*IDN?")
-        logger.info("Connected: %s", identity)
+            self._write("*CLS")
+            self._drain_error_queue()
+            self._write("INIT")
+            self._write("SYSTem:REMote")
+            identity = self._query("*IDN?")
+            logger.info("Connected: %s", identity)
+        except Exception:
+            self._cleanup_resources()
+            raise
 
     def close(self) -> None:
         """Drain error queue, restore local control, close connection."""
@@ -102,11 +108,7 @@ class HMC8012:
             self._drain_error_queue()
             self._write("SYSTem:LOCal")
         finally:
-            self._instrument.close()
-            self._instrument = None
-            if self._resource_manager is not None:
-                self._resource_manager.close()
-                self._resource_manager = None
+            self._cleanup_resources()
 
     def reset(self) -> None:
         """Reset instrument to factory defaults and clear error queue."""
@@ -118,12 +120,34 @@ class HMC8012:
         """Return instrument identification string."""
         return self._query("*IDN?")
 
+    def set_function(self, function: str) -> None:
+        """Select the measurement function without changing range.
+
+        Sends the CONFigure command for the given function. Range remains
+        at whatever value is currently set (auto or manual).
+
+        Args:
+            function: One of the keys in FUNCTION_SCPI_MAP
+                      (dcv, acv, dci, aci, res, fres, cap, temp, freq, cont, diod).
+
+        Raises:
+            ValueError: If function is not recognized.
+        """
+        function = function.lower()
+        if function not in self.FUNCTION_SCPI_MAP:
+            valid = ", ".join(sorted(self.FUNCTION_SCPI_MAP.keys()))
+            raise ValueError(
+                f"Unknown function '{function}'. Valid: {valid}"
+            )
+        self._write(self.FUNCTION_SCPI_MAP[function])
+        self._query("*OPC?")
+
     def measure(self) -> float:
         """Trigger a measurement and return the result.
 
         Uses whatever function and range are currently configured on the
-        instrument. Call set_range() beforehand to configure, or reset()
-        to restore defaults.
+        instrument. Call set_function() or set_range() beforehand to
+        configure, or reset() to restore defaults.
 
         Returns:
             The measurement value as a float.
@@ -185,6 +209,19 @@ class HMC8012:
         self._query("*OPC?")
 
     # -- Private helpers --
+
+    def _cleanup_resources(self) -> None:
+        """Close instrument and resource manager, tolerating failures."""
+        try:
+            if self._instrument is not None:
+                self._instrument.close()
+        finally:
+            self._instrument = None
+            try:
+                if self._resource_manager is not None:
+                    self._resource_manager.close()
+            finally:
+                self._resource_manager = None
 
     def _check_errors(self) -> None:
         """Read SYST:ERR? and raise if the instrument reports an error."""
