@@ -106,9 +106,29 @@ hmc.exe COM3 acv
 
 - Measure success: the measurement value as a plain number (e.g. `4.872341`)
 - Range/reset success: `OK`
-- On error: `ERR`
+- On error: three lines:
 
-All diagnostic messages go to stderr for debugging.
+```
+ERR
+[APP] <command> failed (<layer>).
+[EXC] <ExceptionType>: <message>
+```
+
+The `[APP]` line identifies the failing command and the layer where the error originated:
+
+| Layer | Meaning |
+|-|-|
+| `VISA/network` | Instrument not reached — connection or transport failure |
+| `instrument SCPI` | Instrument reached, reported a SCPI error via `SYST:ERR?` |
+| `instrument` | Instrument responded correctly, but value indicates overflow (`9.9e+37`) |
+| `input sanitization` | Invalid argument rejected before opening the connection |
+| `unexpected` | Unclassified exception — see `[EXC]` for details |
+
+The `[EXC]` line contains the Python exception type and its message verbatim.
+
+**stderr** uses the same prefixes for all diagnostic output:
+- `[APP]` — message written by our code (progress, result, error classification)
+- `[EXC]` — exception type and message, only on error
 
 ## How It Works
 
@@ -319,7 +339,8 @@ Maps function names to the SENSe SCPI prefix used by `set_range()` for range con
 | `cmd_measure(address, args) → None` | Handles the measure command. Extracts function and optional delay from `args`; opens `HMC8012` as a context manager; calls `dmm.measure()`; writes the float result to `result.txt`. Writes `ERR` and exits with code 1 on any exception. |
 | `cmd_range(address, args) → None` | Handles the `range` sub-command. Validates function and value, calls `dmm.set_range()`, writes `OK` to `result.txt`. Writes `ERR` and exits with code 1 on failure. |
 | `cmd_reset(address) → None` | Handles the `reset` command. Opens `HMC8012` and calls `dmm.reset()`. Writes `OK` or `ERR` to `result.txt`. |
-| `write_result(value, output_path=DEFAULT_OUTPUT) → None` | Writes `value + "\n"` to `output_path`, overwriting any existing content. Only write path for `result.txt`. |
+| `write_result(value, app_msg="", exc_detail="", output_path=DEFAULT_OUTPUT) → None` | Writes `result.txt`, overwriting any existing content. Line 1 is always `value`; if `app_msg` is provided it is written on line 2; if `exc_detail` is provided it is written on line 3. |
+| `_write_error(command, layer, exc) → None` | Writes a layered error to both stderr and `result.txt`. Formats `[APP] <command> failed (<layer>).` and `[EXC] <type>: <message>`, prints both to stderr, then calls `write_result("ERR", ...)`. |
 | `_usage_error(message) → None` | Prints an error message and the full usage summary to stderr, then calls `sys.exit(1)`. |
 
 ## Building the Standalone Executable
@@ -345,5 +366,5 @@ The resulting `hmc.exe` is placed in the current directory and accepts the same 
 - `pyserial` - Required on Windows for COM port connections
 
 ```bash
-pip install pyvisa pyvisa-py pyserial
+pip install -r requirements.txt
 ```
