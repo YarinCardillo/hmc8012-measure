@@ -106,10 +106,22 @@ def filter_overflows(
         samples removed.
 
     Raises:
-        InvalidCaptureError: If the fraction of overflow samples exceeds
-            *max_overflow_pct*.
+        InvalidCaptureError: If the input arrays are empty, or if the
+            fraction of overflow samples exceeds *max_overflow_pct*.
     """
-    raise NotImplementedError
+    if len(values) == 0:
+        raise InvalidCaptureError("Empty input arrays")
+
+    mask = values < sentinel
+    overflow_count = len(values) - np.count_nonzero(mask)
+
+    if overflow_count / len(values) > max_overflow_pct:
+        raise InvalidCaptureError(
+            f"{overflow_count}/{len(values)} samples are overflows "
+            f"({overflow_count / len(values):.1%} > {max_overflow_pct:.0%} threshold)"
+        )
+
+    return timestamps[mask], values[mask]
 
 
 def detect_peaks(
