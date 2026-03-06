@@ -15,7 +15,7 @@ hmc.exe <address> <function> [delay_seconds]
 
 | Argomento | Descrizione |
 |-|-|
-| `address` | Indirizzo IP (es. `192.168.0.2`) o porta COM (es. `COM3`) |
+| `address` | Indirizzo IP (es. `192.168.1.25`) o porta COM (es. `COM3`) |
 | `function` | Tipo di misura (vedi tabella sotto) |
 | `delay_seconds` | Attesa opzionale in secondi prima della misura (default: 0) |
 
@@ -76,22 +76,22 @@ I valori di fondo scala usano le unita SI base (volt, ampere, ohm, farad). Ad es
 
 ```bat
 rem 1. Reset dello strumento ai valori di fabbrica
-hmc.exe 192.168.0.2 reset
+hmc.exe 192.168.1.25 reset
 
 rem 2. Configura corrente DC con fondo scala 2A
-hmc.exe 192.168.0.2 range dci 2
+hmc.exe 192.168.1.25 range dci 2
 
 rem 3. Misura (usa la funzione e il fondo scala configurati)
-hmc.exe 192.168.0.2 dci
+hmc.exe 192.168.1.25 dci
 
 rem 4. Misura con ritardo di 1.5s per il posizionamento
-hmc.exe 192.168.0.2 dci 1.5
+hmc.exe 192.168.1.25 dci 1.5
 
 rem 5. Cambia a tensione DC, fondo scala 40V
-hmc.exe 192.168.0.2 range dcv 40
+hmc.exe 192.168.1.25 range dcv 40
 
 rem 6. Misura tensione DC
-hmc.exe 192.168.0.2 dcv
+hmc.exe 192.168.1.25 dcv
 
 rem 7. Passa a fondo scala automatico per tensione AC
 hmc.exe COM3 range acv AUTO

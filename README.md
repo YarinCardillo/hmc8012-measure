@@ -15,7 +15,7 @@ hmc.exe <address> <function> [delay_seconds]
 
 | Argument | Description |
 |-|-|
-| `address` | IP address (e.g. `192.168.0.2`) or COM port (e.g. `COM3`) |
+| `address` | IP address (e.g. `192.168.1.25`) or COM port (e.g. `COM3`) |
 | `function` | Measurement type (see table below) |
 | `delay_seconds` | Optional wait in seconds before measuring (default: 0) |
 
@@ -76,22 +76,22 @@ Range values use SI base units (volts, amps, ohms, farads). For example, `0.4` =
 
 ```bat
 rem 1. Reset instrument to factory defaults
-hmc.exe 192.168.0.2 reset
+hmc.exe 192.168.1.25 reset
 
 rem 2. Configure DC current with 2A range
-hmc.exe 192.168.0.2 range dci 2
+hmc.exe 192.168.1.25 range dci 2
 
 rem 3. Measure (uses the configured function and range)
-hmc.exe 192.168.0.2 dci
+hmc.exe 192.168.1.25 dci
 
 rem 4. Measure again with 1.5s delay for positioning
-hmc.exe 192.168.0.2 dci 1.5
+hmc.exe 192.168.1.25 dci 1.5
 
 rem 5. Change to DC voltage, 40V range
-hmc.exe 192.168.0.2 range dcv 40
+hmc.exe 192.168.1.25 range dcv 40
 
 rem 6. Measure DC voltage
-hmc.exe 192.168.0.2 dcv
+hmc.exe 192.168.1.25 dcv
 
 rem 7. Switch to auto-range for AC voltage
 hmc.exe COM3 range acv AUTO
