@@ -208,6 +208,93 @@ class HMC8012:
 
         self._query("*OPC?")
 
+    def get_function(self) -> str:
+        """Query the current measurement function.
+
+        Returns:
+            Short-form function name as returned by the instrument
+            (e.g. 'VOLT', 'CURR', 'RES', 'FREQ'). Surrounding quotes from
+            the instrument response are stripped.
+        """
+        raw = self._query("FUNC?")
+        return raw.strip().strip('"')
+
+    def get_adc_rate(self) -> str:
+        """Query the current ADC rate setting.
+
+        Returns:
+            'SLOW', 'MED', or 'FAST'. Surrounding quotes are stripped.
+        """
+        raw = self._query("ADCRate?")
+        return raw.strip().strip('"')
+
+    def set_adc_rate(self, rate: str) -> None:
+        """Set the ADC conversion rate.
+
+        Args:
+            rate: One of 'SLOW', 'MED', or 'FAST' (case-insensitive).
+
+        Raises:
+            ValueError: If rate is not valid.
+        """
+        rate_upper = rate.upper()
+        valid = {"SLOW", "MED", "FAST"}
+        if rate_upper not in valid:
+            raise ValueError(
+                f"Invalid ADC rate '{rate}'. Valid: {', '.join(sorted(valid))}"
+            )
+        self._write(f"ADCRate {rate_upper}")
+        self._query("*OPC?")
+
+    def get_range_auto(self, function: str) -> bool:
+        """Query whether auto-range is enabled for the given function.
+
+        Args:
+            function: One of the keys in RANGE_SCPI_MAP (e.g. 'dci', 'dcv').
+
+        Returns:
+            True if auto-range is ON, False if OFF.
+
+        Raises:
+            ValueError: If function does not support range selection.
+        """
+        function = function.lower()
+        if function not in self.RANGE_SCPI_MAP:
+            valid = ", ".join(sorted(self.RANGE_SCPI_MAP.keys()))
+            raise ValueError(
+                f"Function '{function}' does not support range. Valid: {valid}"
+            )
+        prefix = self.RANGE_SCPI_MAP[function]
+        response = self._query(f"{prefix}:AUTO?").strip().strip('"')
+        return response in ("1", "ON")
+
+    def measure_fast(self) -> float:
+        """Trigger a measurement and return the result without error-check round-trip.
+
+        Intended for tight capture loops where SYST:ERR? is deferred until after
+        capture. Sends READ? only; does not call _check_errors(). Parses response
+        and raises RangeOverflowError on overflow sentinel.
+
+        Returns:
+            The measurement value as a float.
+
+        Raises:
+            RangeOverflowError: If the instrument returns the overflow sentinel.
+            ScpiError: If the instrument response cannot be parsed as float.
+        """
+        raw = self._query("READ?")
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ScpiError(f"Invalid measurement response: '{raw}'") from exc
+
+        if value >= self.OVERFLOW_SENTINEL:
+            raise RangeOverflowError(
+                f"Range overflow (sentinel {raw}). "
+                "Use a wider range or check probe connections."
+            )
+        return value
+
     # -- Private helpers --
 
     def _cleanup_resources(self) -> None:

@@ -15,7 +15,7 @@ hmc.exe <address> <function> [delay_seconds]
 
 | Argomento | Descrizione |
 |-|-|
-| `address` | Indirizzo IP (es. `192.168.1.25`) o porta COM (es. `COM3`) |
+| `address` | Indirizzo IP (es. `192.168.1.25`) o porta COM (es. `COM5`) |
 | `function` | Tipo di misura (vedi tabella sotto) |
 | `delay_seconds` | Attesa opzionale in secondi prima della misura (default: 0) |
 
@@ -41,6 +41,40 @@ Ripristina lo strumento ai valori di fabbrica.
 python measure.py <address> reset
 hmc.exe <address> reset
 ```
+
+### Cattura continua DCI
+
+La cattura continua acquisisce campioni di corrente DC nel tempo, esegue la pipeline di analisi (picchi, assestamento, regione stabile) e scrive il **valore stabile** in `result.txt`. Impostare prima il fondo scala DCI (es. `range dci 0.2`). Vedi [Cattura continua: valore stabile](#cattura-continua-valore-stabile) per come si ricava il valore stabile.
+
+**Cattura a tempo (solo result.txt):**
+
+```bat
+python measure.py <address> capture [duration] [timeout]
+```
+
+Con un solo numero, timeout = duration + 10 secondi.
+
+**Cattura a tempo con grafico live:**
+
+```bat
+python measure.py <address> capture-plot [duration] [timeout]
+```
+
+Stessa regola per il timeout. Il grafico mostra la forma d’onda in tempo reale e a fine cattura la regione stabile e un box riepilogo (valore stabile, σ, N, Δt, rate).
+
+**Start/stop (senza durata fissa):**
+
+```bat
+python measure.py <address> capture-plot start [FAST|SLOW|MED]
+```
+
+Esegue fino alla creazione del file sentinel (massimo 1 ora). Il rate ADC è opzionale (default FAST).
+
+```bat
+python measure.py <address> capture-plot stop
+```
+
+Crea il file sentinel; il processo che ha eseguito `start` termina la cattura, esegue l’analisi e scrive `result.txt` come al solito.
 
 ### Funzioni Supportate
 
@@ -94,10 +128,10 @@ rem 6. Misura tensione DC
 hmc.exe 192.168.1.25 dcv
 
 rem 7. Passa a fondo scala automatico per tensione AC
-hmc.exe COM3 range acv AUTO
+hmc.exe COM5 range acv AUTO
 
 rem 8. Misura tensione AC
-hmc.exe COM3 acv
+hmc.exe COM5 acv
 ```
 
 ## Output
@@ -129,6 +163,69 @@ La riga `[EXC]` contiene il tipo di eccezione Python e il suo messaggio verbatim
 **stderr** usa gli stessi prefissi per tutto l'output diagnostico:
 - `[APP]` — messaggio scritto dal nostro codice (avanzamento, risultato, classificazione errore)
 - `[EXC]` — tipo di eccezione e messaggio, solo in caso di errore
+
+## Cattura continua: valore stabile
+
+Il multimetro HMC8012 misura la corrente in continua (DCI). Lo script scrive in `result.txt` **un solo numero**: la **corrente stabile** (media di una fase a regime scelta), nello stesso formato della misura singola. **Modalità** (`analyzer.py`: `stable_target`): **baseline** (predefinita) — segmento “calmo” più lungo con media &lt; 0,4 A (baseline motore spento, es. 7–8,5 s). **post_peak** — regione assestata dopo l’ultimo picco (plateau motore acceso). Default: baseline.
+
+Il valore stabile è la **media della corrente nella parte “calma” del segnale**, cioè dopo l’ultimo picco significativo e dopo che la corrente si è assestata. Viene calcolato in `analyzer.py` (`analyze_waveform`):
+
+1. **Filtro overflow** — Il multimetro può restituire un valore sentinella (es. 9.9e+37) quando va in overflow. Questi punti vengono tolti da tempi e valori (tenendo allineati i due array). Se troppi campioni sono overflow, l’analisi fallisce.
+
+2. **Ricerca dei picchi** — Si cercano i massimi locali con prominenza sufficiente (es. 3 volte la deviazione standard del segnale) per individuare lo spike della corrente (e eventuali altri picchi).
+
+3. **Ancoraggio all’ultimo picco** — Per il valore stabile si considera solo la coda del segnale **dopo** l’ultimo picco significativo.
+
+4. **Punto di settling (assestamento)** — Una finestra mobile (es. 20 campioni) e una soglia di std (es. 0.01 A) definiscono l’inizio della **regione stabile**.
+
+5. **Regione stabile e media** — Tutti i campioni da quell'indice in poi formano la regione stabile. Il **valore stabile** è la **media** di quei campioni; **σ** è la **deviazione standard di quegli stessi campioni** (vedi sottosezione sotto).
+
+**Modalità predefinita: baseline.** Con `stable_target` **baseline** lo script trova il segmento **più lungo** consecutivo “calmo” (std bassa) con media &lt; 0,4 A (`baseline_threshold`, `min_baseline_samples`). Quel segmento (es. 6,4–9 s che include 7–8,5 s) è la zona verde; la sua media è il valore stabile. Usare **post_peak** quando interessa la corrente alta dopo l’ultimo impulso (vedi sotto).
+
+### Come si ricava la regione stabile — post_peak (passo per passo)
+
+Abbiamo una sequenza di campioni di corrente nel tempo. In modalità **post_peak** la **regione stabile** è il tratto dopo l’ultimo picco in cui la corrente si è assestata. L'ordine è: **prima si individuano i picchi**, poi si prende la coda dopo l'ultimo picco, poi si salta un numero fisso di campioni, e **solo su quella coda** si applica la finestra mobile e la std per trovare dove il segnale diventa "calmo". Nel dettaglio:
+
+1. **Individuazione dei picchi sull'intero segnale (filtrato)**  
+   Eseguiamo la ricerca dei picchi sull'intera forma d'onda (es. spike di avvio e eventuali altri). Otteniamo una lista di indici dei picchi.  
+   **Funzioni usate:** `detect_peaks()` in `analyzer.py`, che chiama `scipy.signal.find_peaks(values, prominence=prominence_sigma * np.std(values), distance=min_peak_distance)`. Un picco viene mantenuto solo se la sua prominenza supera quella soglia e dista almeno `min_peak_distance` campioni dal precedente.
+
+2. **Si usa solo la coda dopo l'ultimo picco**  
+   Teniamo solo la parte del segnale **dopo l'ultimo** picco. Tutto ciò che viene prima viene ignorato. Da qui in poi lavoriamo solo su questo tratto "post-picco".  
+   **Nel codice:** l'ultimo picco si ottiene con `anchor = peaks[-1]`. La coda usata nei passi successivi (dopo il salto di transitorio) è `filtered_vals[anchor.index + min_samples_after_peak:]`, salvata come `post_peak_values` in `analyze_waveform()`.
+
+3. **Salto fisso di campioni (transitorio)**  
+   Subito dopo il picco la corrente sta ancora scendendo. Saltiamo i primi **min_samples_after_peak** campioni (default 100) di questa coda, così non consideriamo la discesa come "stabile". Questo salto è il **salto di transitorio**.  
+   **Nel codice:** parametro `min_samples_after_peak` in `analyze_waveform()` in `analyzer.py` (default 100). La coda che poi scandiamo con la finestra inizia all'indice `anchor.index + min_samples_after_peak`.
+
+4. **Finestra mobile e std su questa coda**  
+   Sul **resto** dei campioni (dopo il salto) facciamo scorrere una finestra di **settling_window** punti (default 20). Per ogni posizione calcoliamo la **deviazione standard** dei valori nella finestra. Dove il segnale è ancora in movimento la std è alta; dove è piatto è bassa.  
+   **Formula (Python/NumPy):** per ogni finestra usiamo la stessa definizione di `np.std(finestra)` con default `ddof=0`, cioè σ = sqrt(mean((x - mean(x))**2)). Nel codice, `find_settling_point()` in `analyzer.py` usa `sliding_window_view(values, window_size)` da `numpy.lib.stride_tricks`, poi `rolling_std = windows.std(axis=-1)` così che ogni elemento di `rolling_std` sia la std di una finestra.
+
+5. **Prima "sequenza calma"**  
+   Richiediamo che **n_settling_windows** finestre consecutive (default 3) abbiano std sotto **settling_threshold** (es. 0,01 A). **L'indice di inizio di quella sequenza** è il primo indice della regione stabile.  
+   **Nel codice:** `find_settling_point()` in `analyzer.py`, con `window_size=settling_window`, `std_threshold=settling_threshold`, `n_consecutive=n_settling_windows`. Tutti questi sono argomenti di `analyze_waveform()`.
+
+6. **Regione stabile = da quell'indice finché la std risale**  
+   Non usiamo tutto il resto della cattura fino alla fine: quando l'utente stoppa la cattura, il device può essersi già fermato e la corrente può avere una risalita/caduta finale. Quindi scandiamo in avanti dall'inizio del settling e **terminiamo la regione stabile** quando la std mobile torna sopra la soglia (prima finestra che non è più "calma"). Tutti i campioni dall'inizio del settling a quell'indice formano la **regione stabile** (zona verde). Su quelli calcoliamo la **media** (valore stabile) e la **std** (σ).
+
+In sintesi: **ricerca picchi → coda dopo l'ultimo picco → salto transitorio → finestra mobile + std → prima sequenza di 3 finestre calme (inizio) → scandire in avanti finché la std risale (fine) → regione stabile = solo quel segmento.** I parametri configurabili sono in `analyzer.py`: in `analyze_waveform()` per `min_samples_after_peak`, `settling_window`, `settling_threshold`, `n_settling_windows`; in `find_settling_point()` la logica finestra/std.
+
+### Regione stabile, valore stabile e σ (deviazione standard)
+
+La **zona verde** nel grafico è la **regione stabile**: l'insieme dei campioni dal punto di settling fino al punto in cui la std mobile risale (non necessariamente fino alla fine della cattura). Le tre grandezze usano **esattamente quello stesso insieme di campioni**:
+
+| Grandezza | Significato | Come si calcola |
+|-----------|-------------|-----------------|
+| **Regione stabile** (zona verde) | La parte del segnale considerata assestata (corrente a regime). | Dall'indice di settling all'indice in cui la std mobile torna per la prima volta sopra soglia (ci fermiamo prima di una risalita/caduta finale). |
+| **Valore stabile** (linea + numero) | La corrente che riportiamo. | **Media** dei campioni nella regione stabile. |
+| **σ** (sigma nel box) | Quanto varia la corrente **dentro** la zona verde. | **Deviazione standard** degli **stessi** campioni usati per la media. |
+
+Quindi: **σ è la deviazione standard dei campioni dentro la zona verde.** Stessa fetta di dati → media = valore stabile, std = σ. Se σ è piccolo (es. pochi mA), la zona è piatta e la misura è affidabile. Se σ è grande (es. vicino alla media o quasi mezzo ampere), la regione può ancora includere transitorio (il settling parte troppo in anticipo) oppure il segnale è rumoroso; è un avviso di qualità.
+
+**Dove succede:** `analyzer.py` (filter_overflows, detect_peaks, find_settling_point, analyze_waveform); `capture.py` (loop ContinuousCapture, CaptureResult, precondizioni: DCI, rate ADC FAST/SLOW/MED, range non in auto); `hmc8012.py` (measure_fast, get_function, get_adc_rate, get_range_auto); `measure.py` (cmd_capture, cmd_capture_plot, _run_capture_session, start/stop); `plotting.py` (show_capture_plot; grafico live in measure.py).
+
+---
 
 ## Come Funziona
 
@@ -235,8 +332,11 @@ flowchart LR
 
 | File | Scopo |
 | --- | --- |
-| `measure.py` | Entry point CLI: gestione comandi, parsing argomenti, ritardo, output su file |
+| `measure.py` | Entry point CLI: gestione comandi, parsing argomenti, ritardo, capture/capture-plot, output su file |
 | `hmc8012.py` | Driver strumento HMC8012: connessione, comandi SCPI, misura, fondo scala |
+| `capture.py` | ContinuousCapture: loop di campionamento DCI, sentinel/deadline, sample_callback per grafico live |
+| `analyzer.py` | Analisi forma d’onda: filtro overflow, picchi, punto di settling, valore stabile (media della regione stabile) |
+| `plotting.py` | Grafico post-cattura; il grafico live durante la cattura è in measure.py |
 
 ## Riferimento al Codice
 

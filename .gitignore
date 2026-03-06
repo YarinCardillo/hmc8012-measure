@@ -1,6 +1,7 @@
 # Claude
 .claude/
 CLAUDE.md
+.planning/
 
 # Python
 __pycache__/
@@ -20,3 +21,5 @@ result.txt
 #additional files
 *.jpg
 *.pdf
+.explained.md
+*.csv
