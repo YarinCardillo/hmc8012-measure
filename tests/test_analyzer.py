@@ -53,8 +53,14 @@ class TestDetectPeaks:
         assert peaks[0].amplitude == pytest.approx(peak_current, abs=0.1)
 
     def test_detect_peaks_flat_signal_raises(self, make_flat_waveform):
-        """Flat waveform (no peaks): NoPeaksDetectedError must be raised."""
-        _timestamps, values = make_flat_waveform()
+        """Flat waveform (no peaks): NoPeaksDetectedError must be raised.
+
+        Uses zero noise to produce a truly flat signal.  With any additive
+        noise, random fluctuations can exceed prominence_sigma * std since
+        std *is* the noise itself -- that's expected scipy behavior, not a
+        bug in detect_peaks.
+        """
+        _timestamps, values = make_flat_waveform(noise_std=0.0)
 
         with pytest.raises(NoPeaksDetectedError):
             detect_peaks(values, prominence_sigma=3.0, min_distance=50)
