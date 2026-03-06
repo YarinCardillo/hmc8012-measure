@@ -16,3 +16,7 @@ HMC8012_user_manual.md
 
 # Runtime output
 result.txt
+
+#additional files
+*.jpg
+*.pdf
