@@ -79,7 +79,7 @@ class TestStableValue:
         stable_current = 0.5
         timestamps, values = make_motor_waveform(stable_current=stable_current)
 
-        result = analyze_waveform(timestamps, values)
+        result = analyze_waveform(timestamps, values, stable_target="post_peak")
 
         assert result.stable_value == pytest.approx(stable_current, abs=0.05)
         assert result.stable_std_dev < 0.05
@@ -92,7 +92,7 @@ class TestStableValue:
         timestamps, values = make_motor_waveform(noise_std=1.0)
 
         with pytest.raises(SignalNotSettledError):
-            analyze_waveform(timestamps, values)
+            analyze_waveform(timestamps, values, stable_target="post_peak")
 
 
 # -----------------------------------------------------------------------
@@ -109,11 +109,13 @@ class TestConfigurableParams:
 
         result_tight = analyze_waveform(
             timestamps, values,
+            stable_target="post_peak",
             settling_window=10,
             settling_threshold=0.02,
         )
         result_strict = analyze_waveform(
             timestamps, values,
+            stable_target="post_peak",
             settling_window=40,
             settling_threshold=0.005,
         )
@@ -137,7 +139,7 @@ class TestMultiPeak:
             duration=6.0,
         )
 
-        result = analyze_waveform(timestamps, values)
+        result = analyze_waveform(timestamps, values, stable_target="post_peak")
 
         assert result.anchor_peak_index == len(result.peaks) - 1
 
@@ -149,7 +151,7 @@ class TestMultiPeak:
             duration=6.0,
         )
 
-        result = analyze_waveform(timestamps, values)
+        result = analyze_waveform(timestamps, values, stable_target="post_peak")
 
         assert len(result.peaks) == 2
         assert result.peaks[0].amplitude == pytest.approx(3.0, abs=0.2)
@@ -232,7 +234,7 @@ class TestEdgeCases:
         """The returned AnalysisResult must be frozen (immutable)."""
         timestamps, values = make_motor_waveform()
 
-        result = analyze_waveform(timestamps, values)
+        result = analyze_waveform(timestamps, values, stable_target="post_peak")
 
         assert isinstance(result, AnalysisResult)
         with pytest.raises(dataclasses.FrozenInstanceError):
@@ -251,5 +253,6 @@ class TestEdgeCases:
         with pytest.raises(SignalNotSettledError):
             analyze_waveform(
                 timestamps, values,
+                stable_target="post_peak",
                 settling_window=20,
             )

@@ -15,7 +15,7 @@ hmc.exe <address> <function> [delay_seconds]
 
 | Argument | Description |
 |-|-|
-| `address` | IP address (e.g. `192.168.1.25`) or COM port (e.g. `COM3`) |
+| `address` | IP address (e.g. `192.168.1.25`) or COM port (e.g. `COM5`) |
 | `function` | Measurement type (see table below) |
 | `delay_seconds` | Optional wait in seconds before measuring (default: 0) |
 
@@ -41,6 +41,40 @@ Resets the instrument to factory defaults.
 python measure.py <address> reset
 hmc.exe <address> reset
 ```
+
+### Continuous DCI capture
+
+Continuous capture samples DC current over time, runs the analysis pipeline (peaks, settling, stable region), and writes the **stable value** to `result.txt`. Set the DCI range first (e.g. `range dci 0.2`). See [Continuous capture: stable value](#continuous-capture-stable-value) for how the stable value is derived.
+
+**Timed capture (and result.txt only):**
+
+```bat
+python measure.py <address> capture [duration] [timeout]
+```
+
+With a single number, timeout = duration + 10 seconds.
+
+**Timed capture with live plot:**
+
+```bat
+python measure.py <address> capture-plot [duration] [timeout]
+```
+
+Same timeout rule. The plot shows the waveform in real time and, at the end, the stable region and a summary box (stable value, σ, N, Δt, rate).
+
+**Start/stop (no fixed duration):**
+
+```bat
+python measure.py <address> capture-plot start [FAST|SLOW|MED]
+```
+
+Runs until a sentinel file is created (up to 1 hour). ADC rate is optional (default FAST).
+
+```bat
+python measure.py <address> capture-plot stop
+```
+
+Creates the sentinel file; the process that ran `start` finishes the capture, runs analysis, and writes `result.txt` as usual.
 
 ### Supported Functions
 
@@ -94,10 +128,10 @@ rem 6. Measure DC voltage
 hmc.exe 192.168.1.25 dcv
 
 rem 7. Switch to auto-range for AC voltage
-hmc.exe COM3 range acv AUTO
+hmc.exe COM5 range acv AUTO
 
 rem 8. Measure AC voltage
-hmc.exe COM3 acv
+hmc.exe COM5 acv
 ```
 
 ## Output
@@ -129,6 +163,71 @@ The `[EXC]` line contains the Python exception type and its message verbatim.
 **stderr** uses the same prefixes for all diagnostic output:
 - `[APP]` — message written by our code (progress, result, error classification)
 - `[EXC]` — exception type and message, only on error
+
+## Continuous capture: stable value
+
+The HMC8012 measures DC current (DCI). The script writes a single number to `result.txt`: the **stable current** (mean of a chosen steady phase), in the same format as a single measurement.
+
+**Modes** (`analyzer.py`: `stable_target`): **baseline** (default) — longest quiet segment with mean &lt; 0.4 A (motor-off baseline, e.g. 7–8.5 s). **post_peak** — settled region after the last peak (motor-on plateau).
+
+The stable value is the **mean of the current in the “quiet” part of the signal** — after the last significant peak and after the current has settled. It is computed in `analyzer.py` (`analyze_waveform`):
+
+1. **Overflow filter** — The meter can return a sentinel value (e.g. 9.9e+37) on overflow. Those points are removed from time and value arrays (keeping them aligned). If too many samples are overflow, analysis fails.
+
+2. **Peak detection** — Local maxima with sufficient prominence (e.g. 3× the signal’s standard deviation) are found to locate the current spike (and any later peaks).
+
+3. **Anchor to last peak** — Only the tail of the signal **after** the last significant peak is used for the stable value.
+
+4. **Settling point** — A sliding window (e.g. 20 samples) and a std threshold (e.g. 0.01 A) define the start of the **stable region**.
+
+5. **Stable region and mean** — All samples from that index onward form the stable region. The **stable value** is their **mean**; **σ** is the **standard deviation of those same samples** (see subsection below).
+
+**Default mode: baseline.** The default `stable_target` is **baseline**: the script finds the **longest** contiguous "quiet" (low std) segment whose mean current is below 0.4 A (configurable: `baseline_threshold`, `min_baseline_samples`). That segment (e.g. 6.4–9 s including 7–8.5 s) is the green zone; its mean is the stable value. Use **post_peak** when the value of interest is the high current after the last pulse (see below).
+
+### How we derive the stable region — post_peak (step by step)
+
+We have a sequence of current samples over time. For **post_peak** mode the **stable region** is the stretch after the last peak where the current has settled. The order of operations is: **first detect peaks**, then take the tail after the last peak, then skip a fixed number of samples, then **on that tail only** apply the sliding window and standard deviation to find where the signal becomes "quiet". Details:
+
+1. **Detect peaks on the full (filtered) signal**  
+   We run peak detection on the whole waveform (e.g. inrush spike and any later bumps). We get a list of peak indices.  
+   **Functions used:** `detect_peaks()` in `analyzer.py`, which calls `scipy.signal.find_peaks(values, prominence=prominence_sigma * np.std(values), distance=min_peak_distance)`. A peak is kept only if its prominence exceeds that threshold and it is at least `min_peak_distance` samples away from the previous one.
+
+2. **Use only the tail after the last peak**  
+   We keep only the part of the signal **after the last** peak. Everything before that is ignored. From here on we work only on this "post-peak" segment.  
+   **In the code:** we take the last peak with `anchor = peaks[-1]`. The tail used for the next steps (after the transient skip) is `filtered_vals[anchor.index + min_samples_after_peak:]`, stored as `post_peak_values` in `analyze_waveform()`.
+
+3. **Skip a fixed number of samples (transient)**  
+   Right after the peak the current is still decaying. We skip the first **min_samples_after_peak** samples (default 100) of that tail so we don't treat the decay as "stable". This skip is the **transient skip**.  
+   **In the code:** parameter `min_samples_after_peak` in `analyze_waveform()` in `analyzer.py` (default 100). The tail we actually scan with the window starts at index `anchor.index + min_samples_after_peak`.
+
+4. **Slide a window and compute std on this tail**  
+   On the **remaining** samples (after the skip) we slide a window of **settling_window** points (default 20). For each position we compute the **standard deviation** of the values in the window. Where the signal is still moving, std is high; where it's flat, std is low.  
+   **Formula (Python/NumPy):** for each window we use the same definition as `np.std(window)` with default `ddof=0`, i.e. σ = sqrt(mean((x - mean(x))**2)). In the code, `find_settling_point()` in `analyzer.py` uses `sliding_window_view(values, window_size)` from `numpy.lib.stride_tricks`, then `rolling_std = windows.std(axis=-1)` so that each element of `rolling_std` is the std of one window.
+
+5. **Find the first "quiet" run**  
+   We require **n_settling_windows** consecutive windows (default 3) to have std below **settling_threshold** (e.g. 0.01 A). The **start index of that run** is the first index of the stable region.  
+   **In the code:** `find_settling_point()` in `analyzer.py`, with `window_size=settling_window`, `std_threshold=settling_threshold`, `n_consecutive=n_settling_windows`. All these are arguments of `analyze_waveform()`.
+
+6. **Stable region = from that index until std rises again**  
+   We do **not** use the rest of the capture to the end: when the user stops the capture, the device may already have stopped and the current can show a final rise/fall. So we scan forward from the settling start and **end the stable region** when the rolling std goes back above the threshold (first window that is no longer "quiet"). All samples from the settling start to that end form the **stable region** (the green zone). We take the **mean** of those samples as the stable value and their **std** as σ.
+
+Summary: **Peak detection → tail after last peak → transient skip → sliding window + std → first run of 3 quiet windows (start) → scan forward until std rises again (end) → stable region = that segment only.** Configurable parameters are in `analyzer.py`: `analyze_waveform()` for `min_samples_after_peak`, `settling_window`, `settling_threshold`, `n_settling_windows`; `find_settling_point()` for the window/std logic.
+
+### Stable region, stable value, and σ (standard deviation)
+
+The **green zone** in the plot is the **stable region**: the set of samples from the settling point to the point where the rolling std rises again (not necessarily to the end of the capture). All three quantities use **exactly that same set of samples**:
+
+| Quantity | Meaning | How it is computed |
+|----------|---------|--------------------|
+| **Stable region** (green zone) | The part of the signal considered settled (current at regime). | From the settling index to the index where rolling std first goes back above threshold (so we stop before a final rise/fall). |
+| **Stable value** (line + number) | The current we report. | **Mean** of the samples in the stable region. |
+| **σ** (sigma in the box) | How much the current varies inside the green zone. | **Standard deviation** of the **same** samples used for the mean. |
+
+So: **σ is the standard deviation of the samples inside the green zone.** Same slice of data → mean = stable value, std = σ. If σ is small (e.g. a few mA), the zone is flat and the measure is reliable. If σ is large (e.g. close to the mean or half an ampere), either the region still includes transient (settling may start too early) or the signal is noisy; it is a quality warning.
+
+**Where it happens:** `analyzer.py` (filter_overflows, detect_peaks, find_settling_point, analyze_waveform); `capture.py` (ContinuousCapture loop, CaptureResult, preconditions: DCI, ADC rate FAST/SLOW/MED, range not auto); `hmc8012.py` (measure_fast, get_function, get_adc_rate, get_range_auto); `measure.py` (cmd_capture, cmd_capture_plot, _run_capture_session, start/stop); `plotting.py` (show_capture_plot; live plot is in measure.py).
+
+---
 
 ## How It Works
 
@@ -235,8 +334,11 @@ flowchart LR
 
 | File | Purpose |
 | --- | --- |
-| `measure.py` | CLI entry point: command dispatch, arg parsing, delay, file output |
+| `measure.py` | CLI entry point: command dispatch, arg parsing, delay, capture/capture-plot, file output |
 | `hmc8012.py` | HMC8012 instrument driver: connection, SCPI commands, measurement, range |
+| `capture.py` | ContinuousCapture: DCI sampling loop, sentinel/deadline, sample_callback for live plot |
+| `analyzer.py` | Waveform analysis: overflow filter, peak detection, settling point, stable value (mean of stable region) |
+| `plotting.py` | Post-capture plot; live plot during capture is implemented in measure.py |
 
 ## Code Reference
 
