@@ -20,7 +20,7 @@ Output:
     Measure/capture write the value (or "ERR") to result.txt in the script directory.
     Range, adc (set) and reset write "OK" (or "ERR"); adc without a value writes the rate.
     result.txt is removed at script start and written atomically (temp file + replace).
-    On error, a second line is written with the command context and exception message.
+    On error, line 2 holds the command context ([APP]) and line 3 the exception ([EXC]).
 """
 
 import os
