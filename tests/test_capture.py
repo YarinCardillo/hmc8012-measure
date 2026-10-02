@@ -132,6 +132,18 @@ class TestSampleCallback:
         assert len(received) == len(result.values)
 
 
+class TestStopCondition:
+    """A stop condition ends the capture before its duration (auto-stop)."""
+
+    def test_stops_at_the_first_reading_the_condition_accepts(self, make_fake_instrument):
+        instrument = make_fake_instrument([1.0, 2.0, 3.0, 4.0, 5.0])
+        result = ContinuousCapture(instrument, max_duration=10.0, min_samples=2).run(
+            should_stop=lambda time_s, value: value == 3.0
+        )
+        assert list(result.values) == [1.0, 2.0, 3.0]
+        assert result.aborted_reason is None
+
+
 class TestErrorHandling:
     """Skip failed samples; abort on consecutive failures; insufficient samples."""
 
