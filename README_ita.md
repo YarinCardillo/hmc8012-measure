@@ -6,30 +6,28 @@ English version: [README.md](README.md).
 
 ## Avvio rapido
 
-```bat
-rem Lettura istantanea di corrente DC
-hmc.exe 192.168.0.2 dci
-rem Corrente DC, fondo scala 2 A (resta finché non si cambia)
-hmc.exe 192.168.0.2 range dci 2
-rem Cattura di 10 s: avviala, poi muovi il motore
-hmc.exe 192.168.0.2 capture 10
-rem La stessa, disegnata dal vivo in una finestra compatta
-hmc.exe 192.168.0.2 capture 10 --live
-rem Il valore in ampere, oppure ERR
-type result.txt
-rem Versione di questo eseguibile
-hmc.exe --version
-```
+| Comando | Cosa fa |
+|-|-|
+| `hmc.exe 192.168.0.2 dci` | Una lettura di corrente DC |
+| `hmc.exe 192.168.0.2 range dci 2` | Corrente DC, fondo scala 2 A, resta finché non si cambia |
+| `hmc.exe 192.168.0.2 capture 10` | Cattura di 10 s: avviala, poi muovi il motore |
+| `hmc.exe 192.168.0.2 capture 10 --live` | La stessa, disegnata dal vivo in una finestra compatta |
+| `hmc.exe --version` | Versione di questo eseguibile |
 
-Nel prompt, `rem` apre un commento solo a inizio riga: scritto dopo un comando viene passato a `hmc.exe` come argomento.
+L'esito è in `result.txt` accanto a `hmc.exe`: il valore in ampere, `OK` oppure `ERR`.
 
-Per lo sviluppo (Python 3.11+):
+### Sviluppo
+
+Python 3.11 o successivo:
 
 ```bash
-python -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 python -m pytest -q
 ```
+
+Su Windows l'ambiente si attiva con `venv\Scripts\activate`.
 
 ## Comandi
 
@@ -42,20 +40,27 @@ python -m pytest -q
 | `<indirizzo> adc` | Legge l'ADC rate della funzione attiva | `SLOW`, `MED`, `FAST` o `ERR` |
 | `<indirizzo> adc <SLOW\|MED\|FAST>` | Imposta l'ADC rate della funzione attiva (l'ultima selezionata) | `OK` o `ERR` |
 | `<indirizzo> reset` | Ripristina le impostazioni di fabbrica (ADC rate SLOW, autorange attivo) | `OK` o `ERR` |
-| `<indirizzo> capture [durata] [timeout] [--save-samples] [--save-plot] [--live]` | Registra la corrente DC per `durata` s (default 10) e riporta la corrente media di regime | valore o `ERR` |
+| `<indirizzo> capture [durata] [timeout] [opzioni]` | Registra la corrente DC per `durata` s (default 10) e riporta la corrente media di regime; vedi [Cattura](#cattura) | valore o `ERR` |
 | `--version` | Stampa la versione sulla console | invariato |
 
-**Dettagli di `capture`.** `timeout` vale di default `durata + 10` s. La cattura legge sempre con ADC rate SLOW: se lo strumento è a un altro rate, passa a SLOW e alla fine ripristina il rate precedente, anche se la cattura fallisce, quindi non cambia mai le impostazioni delle misure successive. Impostare prima il fondo scala della corrente DC con `range`; la cattura rifiuta l'autorange.
+### Cattura
 
-**Uscite della cattura per diagnosi** (spente di default, combinabili, in qualsiasi posizione):
+- `timeout` vale di default `durata + 10` s.
+- La cattura legge sempre con ADC rate SLOW. Se lo strumento è a un altro rate, passa a SLOW e alla fine ripristina il rate precedente, anche se la cattura fallisce, così le misure successive mantengono le loro impostazioni.
+- Impostare prima il fondo scala della corrente DC con `range`: la cattura rifiuta l'autorange.
+
+Opzioni per la diagnosi, spente di default, combinabili e in qualsiasi posizione:
 
 | Opzione | Cosa aggiunge |
 |-|-|
-| `--live` | Disegna le letture mentre la cattura procede, in una finestra compatta (circa 1000x640); alla fine segna il regime e la finestra di media e mostra il valore o l'errore. La finestra resta aperta anche dopo che `hmc.exe` è terminato, finché non la chiudi. |
-| `--save-plot` | Scrive lo stesso grafico in `capture_plot_<data UTC>.html` accanto all'eseguibile: un solo file, si apre anche offline con doppio clic (come scheda normale del browser), si ingrandisce trascinando. |
+| `--live` | Disegna le letture mentre la cattura procede, in una finestra compatta (circa 1000x640). Alla fine segna il regime e la finestra di media e mostra il valore o l'errore. La finestra resta aperta anche dopo che `hmc.exe` è terminato, finché non la chiudi. |
+| `--save-plot` | Scrive lo stesso grafico in `capture_plot_<data UTC>.html` accanto all'eseguibile: un solo file che si apre anche offline con doppio clic, come scheda normale del browser. Si ingrandisce trascinando. |
 | `--save-samples` | Scrive le letture grezze in `capture_samples_<data UTC>.csv` accanto all'eseguibile. |
 
-Nessuna cambia ciò che viene scritto in `result.txt`: un file che non si riesce a scrivere o una finestra che non si apre vengono segnalati solo sulla console. Con `--live`, dopo aver scritto `result.txt`, `hmc.exe` aspetta al massimo 3 s perché la finestra riceva l'esito. La finestra live è una finestra nativa (pywebview sul runtime WebView2, presente in Windows 11 e nei Windows 10 aggiornati) gestita da un secondo processo `hmc.exe`: compare dopo l'avvio di quel processo e mostra subito tutte le letture fatte fino a quel momento. Senza WebView2 la pagina si apre in una scheda del browser. La pagina è servita solo su `127.0.0.1` e non è raggiungibile dalla rete.
+- Nessuna opzione cambia `result.txt`. Un file che non si riesce a scrivere o una finestra che non si apre vengono segnalati solo sulla console.
+- Con `--live`, dopo aver scritto `result.txt`, `hmc.exe` aspetta al massimo 3 s perché la finestra riceva l'esito.
+- La finestra live è una finestra nativa (pywebview sul runtime WebView2, presente in Windows 11 e nei Windows 10 aggiornati) gestita da un secondo processo `hmc.exe`. Compare quando quel processo è partito e mostra subito tutte le letture fatte fino a quel momento. Senza WebView2 la pagina si apre in una scheda del browser.
+- La pagina è servita solo su `127.0.0.1`, mai sulla rete.
 
 ### Funzioni e fondi scala
 
@@ -103,27 +108,31 @@ Per una lettura istantanea, attendere la fine del processo, poi leggere il file:
 ```vba
 Dim sh As Object, rc As Long
 Set sh = CreateObject("WScript.Shell")
-rc = sh.Run("""C:\hmc\hmc.exe"" 192.168.0.2 dci", 0, True) ' True = attende la fine
-' Poi legge C:\hmc\result.txt: la riga 1 è il valore oppure ERR.
+rc = sh.Run("""C:\hmc\hmc.exe"" 192.168.0.2 dci", 0, True)
 ```
 
-Per una cattura il motore deve muoversi mentre `hmc.exe` è in esecuzione: quindi lo si avvia senza attendere e si aspetta `result.txt`. Prima cancellare il file vecchio: lo cancella anche `hmc.exe`, ma solo dopo il suo avvio, e fino ad allora ci sarebbe ancora il valore del comando precedente.
+`True` fa aspettare a `Run` la fine di `hmc.exe`; poi la riga 1 di `C:\hmc\result.txt` è il valore oppure `ERR`.
+
+Per una cattura il motore deve muoversi mentre `hmc.exe` è in esecuzione: quindi lo si avvia senza attendere e si aspetta `result.txt`:
 
 ```vba
 Const RESULT_FILE As String = "C:\hmc\result.txt"
 Dim sh As Object, deadline As Date
 If Dir(RESULT_FILE) <> "" Then Kill RESULT_FILE
 Set sh = CreateObject("WScript.Shell")
-sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 capture 10", 0, False ' False = non attende
+sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 capture 10", 0, False
 ' Qui si avvia il motore.
-deadline = Now + TimeSerial(0, 0, 30) ' durata + avvio + margine
+deadline = Now + TimeSerial(0, 0, 30)
 Do While Dir(RESULT_FILE) = "" And Now < deadline
     DoEvents
 Loop
-' Poi legge RESULT_FILE: la riga 1 è il valore oppure ERR. Nessun file dopo la scadenza: la cattura non è terminata.
 ```
 
-`result.txt` viene scritto in un solo passaggio, quindi quando esiste è completo. Leggere i numeri con `Val()`, che usa sempre il punto decimale; `CDbl` segue le impostazioni di Windows e in italiano si aspetta la virgola.
+- Prima cancellare il vecchio `result.txt`. Lo cancella anche `hmc.exe`, ma solo dopo il suo avvio; fino ad allora ci sarebbe ancora il valore del comando precedente.
+- `False` fa tornare subito `Run`, così il motore può partire mentre la cattura procede.
+- La scadenza di 30 s copre la cattura di 10 s, l'avvio e un margine. Nessun file dopo la scadenza significa che la cattura non è terminata.
+- `result.txt` viene scritto in un solo passaggio, quindi quando esiste è completo: la riga 1 è il valore oppure `ERR`.
+- Leggere i numeri con `Val()`, che usa sempre il punto decimale. `CDbl` segue le impostazioni di Windows e in italiano si aspetta la virgola.
 
 **Una cattura, un movimento.** Avviare la cattura almeno 1 s prima che il motore si muova (l'analisi ha bisogno prima della corrente di riposo) e lasciare che il motore si fermi prima della fine della cattura.
 
@@ -170,7 +179,14 @@ flowchart LR
     TESTS -.-> ANA
 ```
 
-Una `capture` funziona così: `measure.py` apre lo strumento (`hmc8012.py`), seleziona la corrente DC, passa a SLOW se serve, `capture.py` interroga `READ?` fino alla fine della durata (le letture fallite restano NaN, cinque di fila fermano la cattura), il rate precedente viene ripristinato, `analyzer.py` calcola il valore e `measure.py` scrive `result.txt`. Con `--live` ogni lettura va anche a `live_plot.py`, che la invia alla pagina come server-sent event; la pagina ridisegna alla frequenza dello schermo. L'esito, o l'errore, va poi alla pagina live e ai file richiesti.
+Cosa fa una `capture`:
+
+1. `measure.py` apre lo strumento (`hmc8012.py`), seleziona la corrente DC e passa a SLOW se serve.
+2. `capture.py` interroga `READ?` fino alla fine della durata. Le letture fallite restano NaN; cinque di fila fermano la cattura.
+3. Il rate precedente viene ripristinato.
+4. `analyzer.py` calcola il valore e `measure.py` scrive `result.txt`.
+
+Con `--live` ogni lettura va anche a `live_plot.py`, che la invia alla pagina come server-sent event; la pagina ridisegna alla frequenza dello schermo. Alla fine l'esito, o l'errore, va alla pagina live e ai file richiesti.
 
 | Modulo | Responsabilità | Punti di ingresso pubblici |
 |-|-|-|
@@ -203,7 +219,11 @@ Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti
 
 ### Test
 
-`python -m pytest -q` esegue tutti i test, compresi quelli che attendono il timeout di connessione su un indirizzo irraggiungibile. L'analyzer è testato contro la simulazione fisica (`simulation.py`, `scenarios.py`: riposo, spunto, ripple di passo, carico PWM, corrente di mantenimento, assestamento lento, aliasing, a ogni ADC rate) e casi limite costruiti a mano. La regola che i test fanno rispettare: una cattura dà il valore giusto o un errore esplicito, mai un valore sbagliato. I test del grafico coprono il contenuto della pagina e l'invio live su una vera connessione locale; la build della CI controlla che il processo della finestra live compilato apra una finestra WebView2, ma l'aspetto si può verificare solo su un PC Windows.
+`python -m pytest -q` esegue tutti i test, compresi quelli che attendono il timeout di connessione su un indirizzo irraggiungibile.
+
+- L'analyzer è testato contro la simulazione fisica (`simulation.py`, `scenarios.py`: riposo, spunto, ripple di passo, carico PWM, corrente di mantenimento, assestamento lento, aliasing, a ogni ADC rate) e contro casi limite costruiti a mano. La regola che i test fanno rispettare: una cattura dà il valore giusto o un errore esplicito, mai un valore sbagliato.
+- I test del grafico coprono il contenuto della pagina e l'invio live su una vera connessione locale.
+- La build della CI controlla che il processo della finestra live compilato apra una finestra WebView2. L'aspetto della finestra si può verificare solo su un PC Windows.
 
 ### Scelte di progetto
 
@@ -216,20 +236,47 @@ Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti
 
 ### Note sullo strumento
 
-Dai manuali utente e SCPI dell'HMC8012: la corrente DC dà 5 / 10 / 200 letture al secondo in SLOW / MED / FAST con 5¾ / 4¾ / 4¾ cifre, l'accuratezza è specificata solo in SLOW, `*RST` imposta SLOW, e `ADCRate` "selects the ADC rate for the activated measurement function". Non indicati nei manuali, da verificare sullo strumento: se `CONF:CURR:DC` senza fondo scala riporta il fondo scala in automatico (la cattura si fermerebbe con `instrument config`) e la durata dell'apertura dell'ADC.
+Dai manuali utente e SCPI dell'HMC8012:
+
+- La corrente DC dà 5 / 10 / 200 letture al secondo in SLOW / MED / FAST, con 5¾ / 4¾ / 4¾ cifre.
+- L'accuratezza è specificata solo in SLOW, e `*RST` imposta SLOW.
+- `ADCRate` "selects the ADC rate for the activated measurement function".
+
+Non indicati nei manuali, da verificare sullo strumento:
+
+- se `CONF:CURR:DC` senza fondo scala riporta il fondo scala in automatico (la cattura si fermerebbe con `instrument config`);
+- la durata dell'apertura dell'ADC.
 
 ## Rilasci e compilazione
 
 La versione sta in `version.py` e da nessun'altra parte: `hmc.exe --version` la stampa e la build la scrive nelle proprietà del file eseguibile. Ogni modifica rilasciata la incrementa (versionamento semantico: major per un contratto host cambiato, minor per nuovi comandi, patch per correzioni).
 
-**Da GitHub.** Ogni push su `master` esegue `.github/workflows/build-windows.yml` su un runner Windows: Python 3.12, i test, la compilazione con Nuitka, uno smoke test (la versione da riga di comando e nelle proprietà del file deve coincidere con `version.py`, un comando non valido deve dare `ERR`, il report di compilazione deve elencare i file del grafico, e il processo della finestra live deve restare attivo con una finestra WebView2) e il caricamento di `hmc.exe` come artifact `hmc-exe-v<versione>-<commit>` nella pagina della run, nella scheda Actions. Si può anche avviare a mano da lì (Run workflow).
+### Da GitHub
 
-**Su Windows**, con Python 3.12 (il MinGW-w64 incluso in Nuitka non supporta la 3.13+):
+Ogni push su `master` esegue `.github/workflows/build-windows.yml` su un runner Windows:
+
+1. Python 3.12 e i test.
+2. La compilazione con Nuitka.
+3. Uno smoke test: la versione da riga di comando e nelle proprietà del file deve coincidere con `version.py`, un comando non valido deve dare `ERR`, il report di compilazione deve elencare i file del grafico, e il processo della finestra live deve restare attivo con una finestra WebView2.
+4. Il caricamento di `hmc.exe` come artifact `hmc-exe-v<versione>-<commit>`, nella pagina della run, scheda Actions.
+
+Si può anche avviare a mano dalla scheda Actions (Run workflow).
+
+### Su Windows
+
+Con Python 3.12 (il MinGW-w64 incluso in Nuitka non supporta la 3.13+):
 
 ```bat
 pip install -r requirements.txt nuitka
 python -m pytest -q
-python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial --include-data-dir=plot_assets=plot_assets --enable-plugin=pywebview --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite --noinclude-pytest-mode=nofollow --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" --file-version=2.1.0 --product-version=2.1.0 measure.py
+python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe ^
+  --include-package=pyvisa --include-package=pyvisa_py --include-package=serial ^
+  --include-data-dir=plot_assets=plot_assets --enable-plugin=pywebview ^
+  --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
+  --noinclude-pytest-mode=nofollow ^
+  --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
+  --file-version=2.1.0 --product-version=2.1.0 ^
+  measure.py
 ```
 
 Usare in `--file-version` e `--product-version` la versione di `version.py`.

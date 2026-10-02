@@ -6,30 +6,28 @@ Italian version: [README_ita.md](README_ita.md).
 
 ## Quick start
 
-```bat
-rem Instantaneous DC current reading
-hmc.exe 192.168.0.2 dci
-rem DC current, 2 A range (kept until changed)
-hmc.exe 192.168.0.2 range dci 2
-rem 10 s capture: start it, then move the motor
-hmc.exe 192.168.0.2 capture 10
-rem The same, drawn live in a compact window
-hmc.exe 192.168.0.2 capture 10 --live
-rem The value in amperes, or ERR
-type result.txt
-rem Version of this executable
-hmc.exe --version
-```
+| Command | What it does |
+|-|-|
+| `hmc.exe 192.168.0.2 dci` | One DC current reading |
+| `hmc.exe 192.168.0.2 range dci 2` | DC current, 2 A range, kept until changed |
+| `hmc.exe 192.168.0.2 capture 10` | 10 s capture: start it, then move the motor |
+| `hmc.exe 192.168.0.2 capture 10 --live` | The same, drawn live in a compact window |
+| `hmc.exe --version` | Version of this executable |
 
-In a console, `rem` only starts a comment at the beginning of a line: written after a command it is passed to `hmc.exe` as an argument.
+The outcome is in `result.txt` next to `hmc.exe`: the value in amperes, `OK`, or `ERR`.
 
-For development (Python 3.11+):
+### Development
+
+Python 3.11 or newer:
 
 ```bash
-python -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 python -m pytest -q
 ```
+
+On Windows, activate the environment with `venv\Scripts\activate`.
 
 ## Commands
 
@@ -42,20 +40,27 @@ python -m pytest -q
 | `<address> adc` | Reads the ADC rate of the active function | `SLOW`, `MED`, `FAST` or `ERR` |
 | `<address> adc <SLOW\|MED\|FAST>` | Sets the ADC rate of the active function (the one selected last) | `OK` or `ERR` |
 | `<address> reset` | Restores factory defaults (ADC rate SLOW, auto-range on) | `OK` or `ERR` |
-| `<address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]` | Records DC current for `duration` s (default 10) and reports the mean running current | value or `ERR` |
+| `<address> capture [duration] [timeout] [flags]` | Records DC current for `duration` s (default 10) and reports the mean running current; see [Capture](#capture) | value or `ERR` |
 | `--version` | Prints the version on the console | unchanged |
 
-**Capture details.** `timeout` defaults to `duration + 10` s. A capture always reads at the SLOW ADC rate: if the instrument is at another rate, capture switches to SLOW and restores the previous rate at the end, also when the capture fails, so it never changes the settings of later measurements. Set the DC current range with `range` first; capture refuses auto-range.
+### Capture
 
-**Capture outputs for diagnosis** (off by default, any combination, in any position):
+- `timeout` defaults to `duration + 10` s.
+- The capture always reads at the SLOW ADC rate. If the instrument is at another rate, capture switches to SLOW and restores the previous rate at the end, also when it fails, so later measurements keep their settings.
+- Set the DC current range with `range` first: capture refuses auto-range.
+
+Flags for diagnosis, off by default, in any combination and position:
 
 | Flag | What it adds |
 |-|-|
-| `--live` | Draws the readings while the capture runs, in a compact window (about 1000x640); at the end it marks the run and the averaging window and shows the value or the error. The window stays open after `hmc.exe` exits, until you close it. |
-| `--save-plot` | Writes the same plot to `capture_plot_<UTC date>.html` next to the executable: one file, opens offline with a double click (as a normal browser tab), zoom by dragging. |
+| `--live` | Draws the readings while the capture runs, in a compact window (about 1000x640). At the end it marks the run and the averaging window and shows the value or the error. The window stays open after `hmc.exe` exits, until you close it. |
+| `--save-plot` | Writes the same plot to `capture_plot_<UTC date>.html` next to the executable: one file that opens offline with a double click, as a normal browser tab. Drag to zoom. |
 | `--save-samples` | Writes the raw readings to `capture_samples_<UTC date>.csv` next to the executable. |
 
-None of them changes what is written to `result.txt`: a file that cannot be written or a window that cannot open is reported on the console only. With `--live`, `hmc.exe` waits up to 3 s after writing `result.txt` so the window receives the outcome. The live window is a native window (pywebview on the WebView2 runtime, part of Windows 11 and of updated Windows 10) run by a second `hmc.exe` process, so it appears after that process starts up and then shows all the readings taken so far. Without WebView2 the page opens in a browser tab. The page is served on `127.0.0.1` only and is not reachable from the network.
+- None of the flags changes `result.txt`. A file that cannot be written or a window that cannot open is reported on the console only.
+- With `--live`, `hmc.exe` waits up to 3 s after writing `result.txt`, so the window receives the outcome.
+- The live window is a native window (pywebview on the WebView2 runtime, part of Windows 11 and of updated Windows 10) run by a second `hmc.exe` process. It appears once that process has started and then shows every reading taken so far. Without WebView2 the page opens in a browser tab.
+- The page is served on `127.0.0.1` only, never on the network.
 
 ### Functions and ranges
 
@@ -103,27 +108,31 @@ For an instantaneous reading, wait for the process to end, then read the file:
 ```vba
 Dim sh As Object, rc As Long
 Set sh = CreateObject("WScript.Shell")
-rc = sh.Run("""C:\hmc\hmc.exe"" 192.168.0.2 dci", 0, True) ' True = wait for exit
-' Then read C:\hmc\result.txt: line 1 is the value or ERR.
+rc = sh.Run("""C:\hmc\hmc.exe"" 192.168.0.2 dci", 0, True)
 ```
 
-For a capture the motor has to move while `hmc.exe` runs, so start it without waiting and wait for `result.txt` instead. Delete the old file first: `hmc.exe` deletes it too, but only after its start-up, and until then a stale value from the previous command would still be there.
+`True` makes `Run` wait until `hmc.exe` exits; then line 1 of `C:\hmc\result.txt` is the value or `ERR`.
+
+For a capture the motor has to move while `hmc.exe` runs, so start it without waiting and wait for `result.txt` instead:
 
 ```vba
 Const RESULT_FILE As String = "C:\hmc\result.txt"
 Dim sh As Object, deadline As Date
 If Dir(RESULT_FILE) <> "" Then Kill RESULT_FILE
 Set sh = CreateObject("WScript.Shell")
-sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 capture 10", 0, False ' False = do not wait
+sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 capture 10", 0, False
 ' Start the motor here.
-deadline = Now + TimeSerial(0, 0, 30) ' duration + start-up + margin
+deadline = Now + TimeSerial(0, 0, 30)
 Do While Dir(RESULT_FILE) = "" And Now < deadline
     DoEvents
 Loop
-' Then read RESULT_FILE: line 1 is the value or ERR. No file after the deadline: the capture did not finish.
 ```
 
-`result.txt` is written in one step, so once it exists it is complete. Parse numbers with `Val()`, which always expects a decimal point; `CDbl` follows the Windows locale and expects a comma on Italian systems.
+- Delete the old `result.txt` first. `hmc.exe` deletes it too, but only after its start-up; until then a stale value from the previous command would still be there.
+- `False` makes `Run` return at once, so the motor can start while the capture runs.
+- The 30 s deadline covers the 10 s capture, the start-up and a margin. No file after the deadline means the capture did not finish.
+- `result.txt` is written in one step, so once it exists it is complete: line 1 is the value or `ERR`.
+- Parse numbers with `Val()`, which always expects a decimal point. `CDbl` follows the Windows locale and expects a comma on Italian systems.
 
 **One capture, one movement.** Start the capture at least 1 s before the motor moves (the analysis needs the idle current first) and let the motor stop before the capture ends.
 
@@ -170,7 +179,14 @@ flowchart LR
     TESTS -.-> ANA
 ```
 
-A `capture` runs: `measure.py` opens the instrument (`hmc8012.py`), selects DC current, switches to SLOW if needed, `capture.py` polls `READ?` until the duration ends (failed readings stay as NaN, five in a row stop the capture), the previous ADC rate is restored, `analyzer.py` computes the value, and `measure.py` writes `result.txt`. With `--live`, each reading also goes to `live_plot.py`, which streams it to the page as a server-sent event; the page redraws at the display refresh rate. The outcome, or the error, then goes to the live page and to the saved files that were asked for.
+What a `capture` does:
+
+1. `measure.py` opens the instrument (`hmc8012.py`), selects DC current and switches to SLOW if needed.
+2. `capture.py` polls `READ?` until the duration ends. Failed readings stay as NaN; five in a row stop the capture.
+3. The previous ADC rate is restored.
+4. `analyzer.py` computes the value and `measure.py` writes `result.txt`.
+
+With `--live`, each reading also goes to `live_plot.py`, which streams it to the page as a server-sent event; the page redraws at the display refresh rate. At the end, the outcome or the error goes to the live page and to the files that were asked for.
 
 | Module | Responsibility | Public entry points |
 |-|-|-|
@@ -203,7 +219,11 @@ Docstrings in each module are the reference for arguments, returns and raised er
 
 ### Tests
 
-`python -m pytest -q` runs the whole suite, including tests that wait for a connection timeout on an unreachable address. The analyzer is tested against the physical simulation (`simulation.py`, `scenarios.py`: idle, inrush, step ripple, PWM load, hold current, slow settling, aliasing, at each ADC rate) and hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value. The plot tests cover the page content and the live stream over a real loopback connection; the CI build checks that the compiled live window process starts a WebView2 window, but how it looks can only be checked on a Windows PC.
+`python -m pytest -q` runs the whole suite, including tests that wait for a connection timeout on an unreachable address.
+
+- The analyzer is tested against the physical simulation (`simulation.py`, `scenarios.py`: idle, inrush, step ripple, PWM load, hold current, slow settling, aliasing, at each ADC rate) and against hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value.
+- The plot tests cover the page content and the live stream over a real loopback connection.
+- The CI build checks that the compiled live window process starts a WebView2 window. How the window looks can only be checked on a Windows PC.
 
 ### Design decisions
 
@@ -216,20 +236,47 @@ Docstrings in each module are the reference for arguments, returns and raised er
 
 ### Instrument notes
 
-From the HMC8012 user and SCPI manuals: DC current gives 5 / 10 / 200 readings per second at SLOW / MED / FAST with 5¾ / 4¾ / 4¾ digits, accuracy is specified at SLOW only, `*RST` sets SLOW, and `ADCRate` "selects the ADC rate for the activated measurement function". Not stated in the manuals, to verify on the instrument: whether `CONF:CURR:DC` without a range resets the range to auto (capture would then stop with `instrument config`), and the ADC aperture length.
+From the HMC8012 user and SCPI manuals:
+
+- DC current gives 5 / 10 / 200 readings per second at SLOW / MED / FAST, with 5¾ / 4¾ / 4¾ digits.
+- Accuracy is specified at SLOW only, and `*RST` sets SLOW.
+- `ADCRate` "selects the ADC rate for the activated measurement function".
+
+Not stated in the manuals, to verify on the instrument:
+
+- whether `CONF:CURR:DC` without a range resets the range to auto (capture would then stop with `instrument config`);
+- the ADC aperture length.
 
 ## Releases and build
 
 The version lives in `version.py` and nowhere else: `hmc.exe --version` prints it and the build writes it into the executable's file properties. Every shipped change bumps it (semantic versioning: major for a changed host contract, minor for new commands, patch for fixes).
 
-**From GitHub.** Every push to `master` runs `.github/workflows/build-windows.yml` on a Windows runner: Python 3.12, the test suite, the Nuitka build, a smoke test (the version on the command line and in the file properties must match `version.py`, an invalid command must give `ERR`, the build report must list the plot assets, and the live window process must stay up with a WebView2 window) and the upload of `hmc.exe` as the artifact `hmc-exe-v<version>-<commit>` on the run page under the Actions tab. It can also be started by hand there (Run workflow).
+### From GitHub
 
-**On Windows**, with Python 3.12 (Nuitka's bundled MinGW-w64 does not support 3.13+):
+Every push to `master` runs `.github/workflows/build-windows.yml` on a Windows runner:
+
+1. Python 3.12 and the test suite.
+2. The Nuitka build.
+3. A smoke test: the version on the command line and in the file properties must match `version.py`, an invalid command must give `ERR`, the build report must list the plot assets, and the live window process must stay up with a WebView2 window.
+4. The upload of `hmc.exe` as the artifact `hmc-exe-v<version>-<commit>`, on the run page under the Actions tab.
+
+It can also be started by hand from the Actions tab (Run workflow).
+
+### On Windows
+
+With Python 3.12 (Nuitka's bundled MinGW-w64 does not support 3.13+):
 
 ```bat
 pip install -r requirements.txt nuitka
 python -m pytest -q
-python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial --include-data-dir=plot_assets=plot_assets --enable-plugin=pywebview --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite --noinclude-pytest-mode=nofollow --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" --file-version=2.1.0 --product-version=2.1.0 measure.py
+python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe ^
+  --include-package=pyvisa --include-package=pyvisa_py --include-package=serial ^
+  --include-data-dir=plot_assets=plot_assets --enable-plugin=pywebview ^
+  --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
+  --noinclude-pytest-mode=nofollow ^
+  --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
+  --file-version=2.1.0 --product-version=2.1.0 ^
+  measure.py
 ```
 
 Use the version from `version.py` in `--file-version` and `--product-version`.
