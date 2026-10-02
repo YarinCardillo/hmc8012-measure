@@ -12,7 +12,8 @@ import pytest
 import measure as measure_module
 from analyzer import AnalysisError
 from capture import CaptureAbortedError, InsufficientSamplesError
-from hmc8012 import RangeOverflowError
+from hmc8012 import RangeOverflowError, ScpiError
+from version import __version__
 
 
 def test_clear_result_removes_file(tmp_path: Path) -> None:
@@ -107,8 +108,19 @@ def test_cli_single_shot_invalid_address_writes_err(tmp_path: Path) -> None:
     assert first_line == "ERR"
 
 
-class _FlatCurrentDmm:
-    """Fake HMC8012 context manager returning a constant idle current."""
+class _FakeDmm:
+    """Fake HMC8012 context manager: constant current, remembers its ADC rate.
+
+    Records the ADC rate in force at every reading, to check what capture used.
+    """
+
+    def __init__(self, adc_rate: str = "SLOW", readings: int | None = None, fail_restore: bool = False) -> None:
+        self.adc_rate = adc_rate
+        self.rates_during_readings: list[str] = []
+        self._readings = readings
+        self._count = 0
+        self._fail_restore = fail_restore
+        self._rate_changes = 0
 
     def __enter__(self):
         return self
@@ -120,59 +132,121 @@ class _FlatCurrentDmm:
         pass
 
     def set_adc_rate(self, rate: str) -> None:
-        pass
+        self._rate_changes += 1
+        if self._fail_restore and self._rate_changes > 1:
+            raise ScpiError('-113,"Undefined header"')
+        self.adc_rate = rate
 
     def get_function(self) -> str:
         return "CURR"
 
     def get_adc_rate(self) -> str:
-        return "FAST"
+        return self.adc_rate
 
     def get_range_auto(self, function: str) -> bool:
         return False
 
     def measure_fast(self) -> float:
+        self._count += 1
+        if self._readings is not None and self._count > self._readings:
+            raise RangeOverflowError("overflow")
+        self.rates_during_readings.append(self.adc_rate)
         time.sleep(0.001)
         return 0.03
 
 
-def test_capture_session_saves_raw_samples_even_when_analysis_fails(tmp_path: Path, monkeypatch) -> None:
-    """A failed analysis must still leave the raw capture on disk for diagnosis."""
-    monkeypatch.setattr(measure_module, "HMC8012", lambda address: _FlatCurrentDmm())
+def _use_fake(monkeypatch, dmm: _FakeDmm) -> _FakeDmm:
+    monkeypatch.setattr(measure_module, "HMC8012", lambda address: dmm)
+    return dmm
+
+
+@pytest.mark.parametrize("previous_rate", ["FAST", "MED"])
+def test_capture_reads_at_slow_and_restores_the_previous_rate(monkeypatch, previous_rate) -> None:
+    dmm = _use_fake(monkeypatch, _FakeDmm(adc_rate=previous_rate))
     with pytest.raises(AnalysisError):
-        measure_module._run_capture_session(
-            "192.0.2.1", 0.3, 5.0,
-            sentinel_path=tmp_path / "capture.stop",
-            samples_dir=tmp_path,
-        )
-    assert len(list(tmp_path.glob("capture_samples_*.csv"))) == 1
+        measure_module._run_capture_session("192.0.2.1", 0.3, 5.0)
+    assert set(dmm.rates_during_readings) == {"SLOW"}
+    assert dmm.adc_rate == previous_rate
 
 
-class _AbortingDmm(_FlatCurrentDmm):
-    """Fake HMC8012 whose readings overflow after a few samples."""
-
-    def __init__(self) -> None:
-        self._count = 0
-
-    def measure_fast(self) -> float:
-        self._count += 1
-        if self._count > 30:
-            raise RangeOverflowError("overflow")
-        return 0.03
+def test_capture_does_not_touch_an_instrument_already_at_slow(monkeypatch) -> None:
+    dmm = _use_fake(monkeypatch, _FakeDmm(adc_rate="SLOW"))
+    with pytest.raises(AnalysisError):
+        measure_module._run_capture_session("192.0.2.1", 0.3, 5.0)
+    assert dmm._rate_changes == 0
 
 
-def test_capture_session_aborted_by_failures_raises_after_saving_samples(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(measure_module, "HMC8012", lambda address: _AbortingDmm())
+def test_capture_restores_the_rate_when_the_capture_stops_early(monkeypatch) -> None:
+    dmm = _use_fake(monkeypatch, _FakeDmm(adc_rate="FAST", readings=30))
     with pytest.raises(CaptureAbortedError):
-        measure_module._run_capture_session(
-            "192.0.2.1", 5.0, 10.0,
-            sentinel_path=tmp_path / "capture.stop",
-            samples_dir=tmp_path,
-        )
+        measure_module._run_capture_session("192.0.2.1", 5.0, 10.0)
+    assert dmm.adc_rate == "FAST"
+
+
+def test_failed_rate_restore_is_reported_without_hiding_the_outcome(monkeypatch, capsys) -> None:
+    _use_fake(monkeypatch, _FakeDmm(adc_rate="FAST", fail_restore=True))
+    with pytest.raises(AnalysisError):
+        measure_module._run_capture_session("192.0.2.1", 0.3, 5.0)
+    assert "Could not restore ADC rate FAST" in capsys.readouterr().err
+
+
+def test_capture_writes_no_samples_file_by_default(monkeypatch) -> None:
+    written = []
+    monkeypatch.setattr(measure_module, "write_capture_samples", lambda *args, **kwargs: written.append(args))
+    _use_fake(monkeypatch, _FakeDmm())
+    with pytest.raises(AnalysisError):
+        measure_module._run_capture_session("192.0.2.1", 0.3, 5.0)
+    assert written == []
+
+
+@pytest.mark.parametrize("dmm, error_type", [
+    (_FakeDmm(), AnalysisError),
+    (_FakeDmm(readings=30), CaptureAbortedError),
+    (_FakeDmm(readings=3), InsufficientSamplesError),
+])
+def test_saved_samples_survive_a_failed_capture(tmp_path: Path, monkeypatch, dmm, error_type) -> None:
+    _use_fake(monkeypatch, dmm)
+    with pytest.raises(error_type):
+        measure_module._run_capture_session("192.0.2.1", 5.0 if dmm._readings else 0.3, 10.0, samples_dir=tmp_path)
     assert len(list(tmp_path.glob("capture_samples_*.csv"))) == 1
 
 
-@pytest.mark.parametrize("args", [["192.0.2.1"], ["192.0.2.1", "range", "temp", "2"]])
+@pytest.mark.parametrize("args, expected", [
+    ([], (10.0, 20.0, False)),
+    (["5"], (5.0, 15.0, False)),
+    (["5", "8"], (5.0, 8.0, False)),
+    (["5", "--save-samples"], (5.0, 15.0, True)),
+    (["--save-samples", "5", "8"], (5.0, 8.0, True)),
+])
+def test_capture_arguments_accept_an_optional_save_samples_flag(args, expected) -> None:
+    assert measure_module._parse_capture_args(args) == expected
+
+
+def test_adc_without_value_writes_the_current_rate(monkeypatch) -> None:
+    written = []
+    monkeypatch.setattr(measure_module, "write_result", lambda value, *args, **kwargs: written.append(value))
+    _use_fake(monkeypatch, _FakeDmm(adc_rate="MED"))
+    measure_module.cmd_adc("192.0.2.1", [])
+    assert written == ["MED"]
+
+
+def test_adc_with_value_sets_the_rate_and_writes_ok(monkeypatch) -> None:
+    written = []
+    monkeypatch.setattr(measure_module, "write_result", lambda value, *args, **kwargs: written.append(value))
+    dmm = _use_fake(monkeypatch, _FakeDmm(adc_rate="FAST"))
+    measure_module.cmd_adc("192.0.2.1", ["slow"])
+    assert dmm.adc_rate == "SLOW"
+    assert written == ["OK"]
+
+
+@pytest.mark.parametrize("args", [["TURBO"], ["SLOW", "extra"]])
+def test_adc_rejects_invalid_arguments(monkeypatch, args) -> None:
+    monkeypatch.setattr(measure_module, "write_result", lambda *args, **kwargs: None)
+    with pytest.raises(SystemExit):
+        measure_module.cmd_adc("192.0.2.1", args)
+
+
+@pytest.mark.parametrize("args", [["192.0.2.1"], ["192.0.2.1", "range", "temp", "2"], ["192.0.2.1", "capture-plot", "5"]])
 def test_cli_usage_errors_replace_stale_result_with_err(args) -> None:
     script_dir = Path(__file__).resolve().parent.parent
     result_file = script_dir / "result.txt"
@@ -182,38 +256,11 @@ def test_cli_usage_errors_replace_stale_result_with_err(args) -> None:
     assert result_file.read_text(encoding="utf-8").split("\n")[0] == "ERR"
 
 
-def test_capture_start_command_runs_script_with_interpreter() -> None:
-    command = measure_module._capture_start_command("COM3", "MED", is_compiled=False)
-    assert command[0] == sys.executable
-    assert command[1].endswith("measure.py")
-    assert command[2:] == ["COM3", "capture-plot", "start", "MED"]
-
-
-def test_capture_start_command_reruns_the_compiled_executable() -> None:
-    command = measure_module._capture_start_command("COM3", "SLOW", is_compiled=True)
-    assert command[0] == sys.argv[0]
-    assert command[1:] == ["COM3", "capture-plot", "start", "SLOW"]
-
-
-class _ShortLivedDmm(_FlatCurrentDmm):
-    """Fake HMC8012 that answers three readings, then fails."""
-
-    def __init__(self) -> None:
-        self._count = 0
-
-    def measure_fast(self) -> float:
-        self._count += 1
-        if self._count > 3:
-            raise RangeOverflowError("overflow")
-        return 0.03
-
-
-def test_capture_session_saves_samples_when_too_few_readings(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(measure_module, "HMC8012", lambda address: _ShortLivedDmm())
-    with pytest.raises(InsufficientSamplesError):
-        measure_module._run_capture_session(
-            "192.0.2.1", 5.0, 10.0,
-            sentinel_path=tmp_path / "capture.stop",
-            samples_dir=tmp_path,
-        )
-    assert len(list(tmp_path.glob("capture_samples_*.csv"))) == 1
+def test_cli_version_prints_the_version_without_touching_result() -> None:
+    script_dir = Path(__file__).resolve().parent.parent
+    result_file = script_dir / "result.txt"
+    result_file.write_text("0.123\n", encoding="utf-8")
+    proc = subprocess.run([sys.executable, "-m", "measure", "--version"], capture_output=True, text=True, cwd=script_dir)
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == __version__
+    assert result_file.read_text(encoding="utf-8") == "0.123\n"
