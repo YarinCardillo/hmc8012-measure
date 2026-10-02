@@ -1,6 +1,6 @@
 # HMC8012 Measurement Layer
 
-Strumento a riga di comando per il multimetro digitale Rohde & Schwarz HMC8012, chiamato da un programma host (una macro VBA). Ogni chiamata fa una cosa, scrive l'esito in `result.txt` accanto all'eseguibile e termina. Oltre alle letture istantanee, `capture` registra la corrente di alimentazione di un motore mentre è in funzione e ne riporta la corrente media di regime, gestendo il picco di spunto e il rumore. Su richiesta disegna anche la cattura, dal vivo in una finestra compatta o salvata come pagina.
+Strumento a riga di comando per il multimetro digitale Rohde & Schwarz HMC8012, chiamato da un programma host (una macro VBA). Ogni chiamata fa una cosa, scrive l'esito in `result.txt` accanto all'eseguibile e termina. Oltre alle letture istantanee, `capture` registra la corrente di alimentazione di un motore mentre è in funzione e ne riporta la corrente media di regime, gestendo il picco di spunto e il rumore. Se non si indica la durata, la cattura si ferma da sola quando il motore si è fermato. Su richiesta mostra anche il grafico della cattura, in tempo reale in una piccola finestra oppure salvato in un file HTML.
 
 English version: [README.md](README.md).
 
@@ -10,8 +10,9 @@ English version: [README.md](README.md).
 |-|-|
 | `hmc.exe 192.168.0.2 dci` | Una lettura di corrente DC |
 | `hmc.exe 192.168.0.2 range dci 2` | Corrente DC, fondo scala 2 A, resta finché non si cambia |
-| `hmc.exe 192.168.0.2 capture 10` | Cattura di 10 s: avviala, poi muovi il motore |
-| `hmc.exe 192.168.0.2 capture 10 --live` | La stessa, disegnata dal vivo in una finestra compatta |
+| `hmc.exe 192.168.0.2 capture` | Cattura che si ferma da sola 3 s dopo l'arresto del motore (al massimo 30 s): avviala, poi muovi il motore |
+| `hmc.exe 192.168.0.2 capture 10` | Cattura di 10 s esatti |
+| `hmc.exe 192.168.0.2 capture --live` | Cattura con il grafico in tempo reale in una piccola finestra |
 | `hmc.exe --version` | Versione di questo eseguibile |
 
 L'esito è in `result.txt` accanto a `hmc.exe`: il valore in ampere, `OK` oppure `ERR`.
@@ -40,12 +41,13 @@ Su Windows l'ambiente si attiva con `venv\Scripts\activate`.
 | `<indirizzo> adc` | Legge l'ADC rate della funzione attiva | `SLOW`, `MED`, `FAST` o `ERR` |
 | `<indirizzo> adc <SLOW\|MED\|FAST>` | Imposta l'ADC rate della funzione attiva (l'ultima selezionata) | `OK` o `ERR` |
 | `<indirizzo> reset` | Ripristina le impostazioni di fabbrica (ADC rate SLOW, autorange attivo) | `OK` o `ERR` |
-| `<indirizzo> capture [durata] [timeout] [opzioni]` | Registra la corrente DC per `durata` s (default 10) e riporta la corrente media di regime; vedi [Cattura](#cattura) | valore o `ERR` |
+| `<indirizzo> capture [durata] [timeout] [opzioni]` | Registra la corrente DC e riporta la corrente media a regime. Senza `durata` si ferma da sola quando il motore torna a riposo (al massimo 30 s); con `durata` registra per `durata` secondi. Vedi [Cattura](#cattura) | valore o `ERR` |
 | `--version` | Stampa la versione sulla console | invariato |
 
 ### Cattura
 
-- `timeout` vale di default `durata + 10` s.
+- Senza `durata` la cattura si ferma 3 s dopo che la corrente è tornata al livello di riposo iniziale, purché prima il motore abbia girato per almeno 0.5 s. Le pause più brevi di 3 s dentro un movimento non la fermano. Se il motore non si ferma mai, la cattura termina a 30 s.
+- `timeout` vale di default `durata + 10` s (40 s senza `durata`).
 - La cattura legge sempre con ADC rate SLOW. Se lo strumento è a un altro rate, passa a SLOW e alla fine ripristina il rate precedente, anche se la cattura fallisce, così le misure successive mantengono le loro impostazioni.
 - Impostare prima il fondo scala della corrente DC con `range`: la cattura rifiuta l'autorange.
 
@@ -53,7 +55,7 @@ Opzioni per la diagnosi, spente di default, combinabili e in qualsiasi posizione
 
 | Opzione | Cosa aggiunge |
 |-|-|
-| `--live` | Disegna le letture mentre la cattura procede, in una finestra compatta (circa 1000x640). Alla fine segna il regime e la finestra di media e mostra il valore o l'errore. La finestra resta aperta anche dopo che `hmc.exe` è terminato, finché non la chiudi. |
+| `--live` | Mostra in tempo reale il grafico delle letture durante la cattura, in una piccola finestra (circa 1000x640). Alla fine evidenzia il tratto a regime e l'intervallo usato per la media, e mostra il valore o l'errore. La finestra resta aperta anche dopo la chiusura di `hmc.exe`, finché non la chiudi tu. |
 | `--save-plot` | Scrive lo stesso grafico in `capture_plot_<data UTC>.html` accanto all'eseguibile: un solo file che si apre anche offline con doppio clic, come scheda normale del browser. Si ingrandisce trascinando. |
 | `--save-samples` | Scrive le letture grezze in `capture_samples_<data UTC>.csv` accanto all'eseguibile. |
 
@@ -101,7 +103,7 @@ Opzioni per la diagnosi, spente di default, combinabili e in qualsiasi posizione
 | `input sanitization` | Argomento non valido |
 | `unexpected` | Qualsiasi altro errore; i dettagli sono in `[EXC]` |
 
-**Tempi.** Ogni comando paga prima l'avvio di `hmc.exe` (l'eseguibile a file singolo si estrae all'avvio; di solito qualche secondo, da misurare sul PC di laboratorio). Una cattura dura poi `durata` secondi più l'analisi (molto sotto 0.1 s).
+**Tempi.** Ogni comando paga prima l'avvio di `hmc.exe` (l'eseguibile a file singolo si estrae all'avvio; di solito qualche secondo, da misurare sul PC di laboratorio). Una cattura dura poi `durata` secondi (senza durata, fino a 3 s dopo l'arresto del motore), più l'analisi, che richiede molto meno di 0.1 s.
 
 Per una lettura istantanea, attendere la fine del processo, poi leggere il file:
 
@@ -120,9 +122,9 @@ Const RESULT_FILE As String = "C:\hmc\result.txt"
 Dim sh As Object, deadline As Date
 If Dir(RESULT_FILE) <> "" Then Kill RESULT_FILE
 Set sh = CreateObject("WScript.Shell")
-sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 capture 10", 0, False
+sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 capture", 0, False
 ' Qui si avvia il motore.
-deadline = Now + TimeSerial(0, 0, 30)
+deadline = Now + TimeSerial(0, 0, 45)
 Do While Dir(RESULT_FILE) = "" And Now < deadline
     DoEvents
 Loop
@@ -130,11 +132,11 @@ Loop
 
 - Prima cancellare il vecchio `result.txt`. Lo cancella anche `hmc.exe`, ma solo dopo il suo avvio; fino ad allora ci sarebbe ancora il valore del comando precedente.
 - `False` fa tornare subito `Run`, così il motore può partire mentre la cattura procede.
-- La scadenza di 30 s copre la cattura di 10 s, l'avvio e un margine. Nessun file dopo la scadenza significa che la cattura non è terminata.
+- La scadenza di 45 s copre la cattura più lunga (30 s), l'avvio e un margine; con `capture 10` bastano 30 s. Se dopo la scadenza il file non c'è, la cattura non è terminata.
 - `result.txt` viene scritto in un solo passaggio, quindi quando esiste è completo: la riga 1 è il valore oppure `ERR`.
 - Leggere i numeri con `Val()`, che usa sempre il punto decimale. `CDbl` segue le impostazioni di Windows e in italiano si aspetta la virgola.
 
-**Una cattura, un movimento.** Avviare la cattura almeno 1 s prima che il motore si muova (l'analisi ha bisogno prima della corrente di riposo) e lasciare che il motore si fermi prima della fine della cattura.
+**Una cattura, un movimento.** Avviare la cattura almeno 1 s prima che il motore si muova (l'analisi deve prima misurare la corrente di riposo). Con una durata fissa il motore deve fermarsi prima della fine della cattura; senza durata è la cattura ad aspettarlo.
 
 ## Come si calcola il valore della cattura
 
@@ -160,6 +162,7 @@ Loop
 - Un carico periodico con periodo sottomultiplo dei 200 ms di conversione in SLOW può dare aliasing se l'apertura dell'ADC è più corta del periodo di conversione (non indicato nel manuale). Il ripple veloce (passi dello stepper, PWM del driver) si media dentro ogni conversione.
 - Carichi che variano su decimi di secondo danno poche letture distinte a 5 al secondo e finiscono spesso in `ImpreciseValueError`; un regime più lungo aiuta.
 - Un livello diverso più breve di circa `max_settle_s` all'inizio o alla fine del regime viene tagliato come se fosse un transitorio.
+- Una pausa dentro un movimento (la corrente torna a riposo e poi riparte) dà `ERR`. Senza durata, una pausa di 3 s o più chiude anche la cattura.
 
 ## Guida per sviluppatori
 
@@ -175,6 +178,7 @@ flowchart LR
     CLI --> LIVE["live_plot.py<br/>server della pagina live"]
     LIVE --> PLOT
     CLI --> WIN["live_window.py<br/>processo della finestra nativa"]
+    CLI --> STOP["stop_detector.py<br/>stop automatico"]
     SIM["simulation.py + scenarios.py<br/>banco di prova fisico"] -.-> TESTS["tests/"]
     TESTS -.-> ANA
 ```
@@ -182,7 +186,7 @@ flowchart LR
 Cosa fa una `capture`:
 
 1. `measure.py` apre lo strumento (`hmc8012.py`), seleziona la corrente DC e passa a SLOW se serve.
-2. `capture.py` interroga `READ?` fino alla fine della durata. Le letture fallite restano NaN; cinque di fila fermano la cattura.
+2. `capture.py` interroga `READ?` fino alla fine della durata oppure, senza durata, finché `stop_detector.py` non vede il motore di nuovo a riposo. Le letture fallite restano NaN; cinque di fila fermano la cattura.
 3. Il rate precedente viene ripristinato.
 4. `analyzer.py` calcola il valore e `measure.py` scrive `result.txt`.
 
@@ -193,6 +197,7 @@ Con `--live` ogni lettura va anche a `live_plot.py`, che la invia alla pagina co
 | `measure.py` | Dispatch CLI, `result.txt`, livelli di errore | `main`, `cmd_*`, `write_result`, `clear_result` |
 | `hmc8012.py` | SCPI via PyVISA (socket LAN o COM); ogni setter controlla `SYST:ERR?` | `HMC8012`, `ScpiError`, `RangeOverflowError` |
 | `capture.py` | Loop di lettura a tempo, conteggio dei fallimenti | `ContinuousCapture`, `CaptureResult` |
+| `stop_detector.py` | Stop automatico: chiude una cattura senza durata quando il motore ha girato ed è tornato a riposo | `StopDetector` |
 | `analyzer.py` | Riposo, regime, finestra di media, precisione; solleva errori invece di tirare a indovinare | `analyze_waveform`, `AnalysisConfig`, `AnalysisResult`, classi di errore |
 | `capture_plot.py` | Pagina del grafico di una cattura (salvata o live), da `plot_assets/` | `render_capture_plot`, `write_capture_plot`, `render_live_page` |
 | `live_plot.py` | Serve la pagina live su `127.0.0.1` e invia le letture | `LivePlot` |
@@ -211,6 +216,8 @@ Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti
 | Taratura dell'analisi (finestra di smoothing, regime minimo, tagli, tolleranza) | default di `AnalysisConfig` in `analyzer.py` |
 | ADC rate delle catture | `CAPTURE_ADC_RATE` in `measure.py` |
 | Letture fallite che fermano una cattura | `DEFAULT_MAX_CONSECUTIVE_FAILURES` in `capture.py` |
+| Tempo a riposo che chiude una cattura senza durata | `STOP_HOLD_S` in `stop_detector.py` |
+| Durata massima di una cattura senza durata | `AUTO_STOP_MAX_DURATION_S` in `measure.py` |
 | Aspetto del grafico (colori, etichette, disposizione) | `plot_assets/capture_plot.html` |
 | Dimensione e titolo della finestra live | `WINDOW_SIZE`, `WINDOW_TITLE` in `live_window.py` |
 | Un nuovo comportamento simulato per i test | un builder e una voce in `SCENARIOS` (`scenarios.py`) |
@@ -275,7 +282,7 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
   --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
   --noinclude-pytest-mode=nofollow ^
   --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
-  --file-version=2.1.0 --product-version=2.1.0 ^
+  --file-version=3.0.0 --product-version=3.0.0 ^
   measure.py
 ```
 

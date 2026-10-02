@@ -116,6 +116,7 @@ class ContinuousCapture:
         self,
         deadline: float | None = None,
         on_sample: Callable[[float, float], None] | None = None,
+        should_stop: Callable[[float, float], bool] | None = None,
     ) -> CaptureResult:
         """Execute the continuous capture loop.
 
@@ -124,6 +125,9 @@ class ContinuousCapture:
                 to abort. When set, the loop exits when monotonic time >= deadline.
             on_sample: Optional callback receiving ``(time_s, value)`` for every
                 reading as soon as it is taken, NaN for a failed one (live plot).
+            should_stop: Optional condition receiving ``(time_s, value)`` for every
+                reading; the capture ends at the first reading it returns True for
+                (auto-stop). Not an abort: the capture completes normally.
 
         Returns:
             CaptureResult with collected timestamps, values, and metadata.
@@ -134,7 +138,7 @@ class ContinuousCapture:
         """
         self._verify_instrument_state()
         start_time = time.perf_counter()
-        timestamps, values, aborted_reason = self._acquire(start_time, deadline, on_sample)
+        timestamps, values, aborted_reason = self._acquire(start_time, deadline, on_sample, should_stop)
         result = _build_result(timestamps, values, time.perf_counter() - start_time, aborted_reason)
         if result.sample_count < self._min_samples:
             raise InsufficientSamplesError(
@@ -147,8 +151,9 @@ class ContinuousCapture:
         start_time: float,
         deadline: float | None,
         on_sample: Callable[[float, float], None] | None,
+        should_stop: Callable[[float, float], bool] | None,
     ) -> tuple[list[float], list[float], str | None]:
-        """Poll until the duration or deadline ends, or too many consecutive failures.
+        """Poll until the duration or deadline ends, the stop condition holds, or too many consecutive failures.
 
         A failed reading is kept as a NaN marker at its time, so the analysis
         knows a reading (often an overflowing peak) is missing there.
@@ -165,6 +170,8 @@ class ContinuousCapture:
             values.append(value)
             if on_sample is not None:
                 on_sample(timestamps[-1], value)
+            if should_stop is not None and should_stop(timestamps[-1], value):
+                break
             if failure is None:
                 consecutive_failures = 0
                 continue

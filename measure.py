@@ -13,7 +13,8 @@ Arguments:
     address    IP address (e.g. 192.168.0.2) or COM port (e.g. COM3)
     function   Measurement type: dcv|acv|dci|aci|res|fres|cap|temp|freq|cont|diod
     delay      Optional wait in seconds before measuring (default: 0).
-    duration   Capture window in seconds (default: 10).
+    duration   Capture window in seconds. If omitted, the capture stops by itself
+               once the device has run and is back at idle (at most 30 s).
     timeout    Optional. If omitted, timeout = duration + 10.
     --save-samples  Also write the raw readings to capture_samples_<UTC date>.csv.
     --save-plot     Also write the plot to capture_plot_<UTC date>.html.
@@ -50,6 +51,7 @@ from capture_plot import write_capture_plot
 from hmc8012 import HMC8012, RangeOverflowError, ScpiError
 from live_plot import LivePlot
 from live_window import LIVE_WINDOW_FLAG, open_live_window, run_live_window
+from stop_detector import StopDetector
 from version import __version__
 
 # sys.argv[0], not __file__: Nuitka onefile resolves __file__ to a temp extraction directory.
@@ -57,6 +59,8 @@ SCRIPT_DIR = Path(sys.argv[0]).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "result.txt"
 # Extra seconds added to duration when timeout is not given (analysis + margin)
 CAPTURE_TIMEOUT_MARGIN = 10.0
+# Longest capture without a duration, which stops by itself when the device is back at idle.
+AUTO_STOP_MAX_DURATION_S = 30.0
 # Prefix for raw capture samples file; name will be {prefix}_YYYY-MM-DD_HH-MM-SS.csv
 CAPTURE_SAMPLES_FILE_PREFIX = "capture_samples"
 SAVE_SAMPLES_FLAG = "--save-samples"
@@ -78,6 +82,7 @@ class CaptureOptions(NamedTuple):
     save_samples: bool
     save_plot: bool
     show_live: bool
+    stop_on_idle: bool
 
 
 def cmd_measure(address: str, args: list[str]) -> None:
@@ -221,7 +226,8 @@ def cmd_capture(address: str, args: list[str]) -> None:
 
     Runs continuous DCI capture at the SLOW ADC rate, analyzes the waveform for
     the mean running current and writes it to result.txt in the same format as
-    a single-shot measure. Caller must set the range beforehand (e.g.
+    a single-shot measure. Without a duration the capture stops by itself once
+    the device has run and is back at idle. Caller must set the range beforehand (e.g.
     measure.py <address> range dci 2). Next to the script, --save-samples writes
     the raw readings to capture_samples_<UTC date>.csv and --save-plot the plot
     to capture_plot_<UTC date>.html; --live draws the capture in a compact window
@@ -237,6 +243,7 @@ def cmd_capture(address: str, args: list[str]) -> None:
                 samples_dir=SCRIPT_DIR if options.save_samples else None,
                 plot_dir=SCRIPT_DIR if options.save_plot else None,
                 live=live,
+                stop_on_idle=options.stop_on_idle,
             )
             write_result(str(analysis.stable_value))
             print(
@@ -284,18 +291,21 @@ def _write_error(command: str, layer: str, exc: Exception) -> None:
 def _parse_capture_args(args: list[str]) -> CaptureOptions:
     """Parse [duration] [timeout] and the capture flags, which may appear anywhere.
 
-    If only duration is given, timeout = duration + CAPTURE_TIMEOUT_MARGIN.
+    Without a duration the capture stops on idle, for at most AUTO_STOP_MAX_DURATION_S.
+    If no timeout is given, timeout = duration + CAPTURE_TIMEOUT_MARGIN.
     """
     numbers = [arg for arg in args if arg not in CAPTURE_FLAGS]
     if len(numbers) > 2:
         _usage_error(f"capture takes at most [duration] [timeout] and the flags {', '.join(CAPTURE_FLAGS)}.")
-    duration = _positive_number(numbers[0], "Capture duration") if numbers else 10.0
+    duration = _positive_number(numbers[0], "Capture duration") if numbers else AUTO_STOP_MAX_DURATION_S
     timeout = duration + CAPTURE_TIMEOUT_MARGIN
     if len(numbers) == 2:
         timeout = _positive_number(numbers[1], "Timeout")
         if timeout < duration:
             _usage_error("Timeout must be >= capture duration.")
-    return CaptureOptions(duration, timeout, SAVE_SAMPLES_FLAG in args, SAVE_PLOT_FLAG in args, LIVE_FLAG in args)
+    return CaptureOptions(
+        duration, timeout, SAVE_SAMPLES_FLAG in args, SAVE_PLOT_FLAG in args, LIVE_FLAG in args, not numbers
+    )
 
 
 def _positive_number(text: str, name: str) -> float:
@@ -325,8 +335,12 @@ def _run_capture_session(
     samples_dir: Path | None = None,
     plot_dir: Path | None = None,
     live: LivePlot | None = None,
+    stop_on_idle: bool = False,
 ) -> tuple[CaptureResult, AnalysisResult]:
     """Execute one capture session at the SLOW ADC rate and return capture + analysis results.
+
+    With *stop_on_idle* the capture ends once the device has run and is back
+    at idle; *duration* is then only its upper bound.
 
     The instrument's previous ADC rate is restored afterwards, so a capture
     never changes the settings of later measurements. The diagnostic outputs
@@ -336,7 +350,7 @@ def _run_capture_session(
     outputs = _CaptureOutputs(datetime.now(timezone.utc), samples_dir, plot_dir, live)
     result = None
     try:
-        result = _acquire_capture(address, duration, timeout, live.add_sample if live else None)
+        result = _acquire_capture(address, duration, timeout, live.add_sample if live else None, stop_on_idle)
         analysis = _analyze_capture(result)
     except Exception as exc:
         captured = exc.result if isinstance(exc, InsufficientSamplesError) else result
@@ -351,13 +365,15 @@ def _acquire_capture(
     duration: float,
     timeout: float,
     on_sample: Callable[[float, float], None] | None,
+    stop_on_idle: bool,
 ) -> CaptureResult:
-    """Read DC current at the SLOW ADC rate for *duration* s, then restore the previous rate."""
+    """Read DC current at the SLOW ADC rate for *duration* s, or until back at idle, then restore the previous rate."""
+    should_stop = StopDetector().should_stop if stop_on_idle else None
     with HMC8012(address) as dmm:
         dmm.set_function("dci")
         with _temporary_adc_rate(dmm, CAPTURE_ADC_RATE):
             capture = ContinuousCapture(dmm, max_duration=duration)
-            return capture.run(deadline=time.monotonic() + timeout, on_sample=on_sample)
+            return capture.run(deadline=time.monotonic() + timeout, on_sample=on_sample, should_stop=should_stop)
 
 
 def _analyze_capture(result: CaptureResult) -> AnalysisResult:
@@ -524,7 +540,8 @@ def _usage_error(message: str) -> None:
         "  python measure.py <address> adc [SLOW|MED|FAST]            Read or set the ADC rate\n"
         "  python measure.py <address> reset                          Reset\n"
         "  python measure.py <address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]\n"
-        "                                                             Mean running DC current\n"
+        "                                                             Mean running DC current; without a duration\n"
+        "                                                             it stops once the device is back at idle\n"
         f"  python measure.py --version                                Version ({__version__})",
         file=sys.stderr,
     )
