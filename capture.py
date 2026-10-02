@@ -8,7 +8,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 import numpy as np
 
@@ -112,12 +112,18 @@ class ContinuousCapture:
         self._min_samples = min_samples
         self._max_consecutive_failures = max_consecutive_failures
 
-    def run(self, deadline: float | None = None) -> CaptureResult:
+    def run(
+        self,
+        deadline: float | None = None,
+        on_sample: Callable[[float, float], None] | None = None,
+    ) -> CaptureResult:
         """Execute the continuous capture loop.
 
         Args:
             deadline: Optional absolute wall-clock time (time.monotonic()) at which
                 to abort. When set, the loop exits when monotonic time >= deadline.
+            on_sample: Optional callback receiving ``(time_s, value)`` for every
+                reading as soon as it is taken, NaN for a failed one (live plot).
 
         Returns:
             CaptureResult with collected timestamps, values, and metadata.
@@ -128,7 +134,7 @@ class ContinuousCapture:
         """
         self._verify_instrument_state()
         start_time = time.perf_counter()
-        timestamps, values, aborted_reason = self._acquire(start_time, deadline)
+        timestamps, values, aborted_reason = self._acquire(start_time, deadline, on_sample)
         result = _build_result(timestamps, values, time.perf_counter() - start_time, aborted_reason)
         if result.sample_count < self._min_samples:
             raise InsufficientSamplesError(
@@ -140,6 +146,7 @@ class ContinuousCapture:
         self,
         start_time: float,
         deadline: float | None,
+        on_sample: Callable[[float, float], None] | None,
     ) -> tuple[list[float], list[float], str | None]:
         """Poll until the duration or deadline ends, or too many consecutive failures.
 
@@ -151,22 +158,24 @@ class ContinuousCapture:
         consecutive_failures = 0
         while not self._is_finished(start_time, deadline):
             try:
-                value = self._instrument.measure_fast()
-                consecutive_failures = 0
+                value, failure = self._instrument.measure_fast(), None
             except (ScpiError, RangeOverflowError) as exc:
-                timestamps.append(time.perf_counter() - start_time)
-                values.append(math.nan)
-                consecutive_failures += 1
-                logger.warning("Sample %d failed: %s", len(values) - 1, exc)
-                if consecutive_failures >= self._max_consecutive_failures:
-                    logger.error("Aborting: %d consecutive failures", consecutive_failures)
-                    return timestamps, values, (
-                        f"Stopped after {consecutive_failures} consecutive failed readings "
-                        f"at {timestamps[-1]:.2f} s: {exc}"
-                    )
-                continue
+                value, failure = math.nan, exc
             timestamps.append(time.perf_counter() - start_time)
             values.append(value)
+            if on_sample is not None:
+                on_sample(timestamps[-1], value)
+            if failure is None:
+                consecutive_failures = 0
+                continue
+            consecutive_failures += 1
+            logger.warning("Sample %d failed: %s", len(values) - 1, failure)
+            if consecutive_failures >= self._max_consecutive_failures:
+                logger.error("Aborting: %d consecutive failures", consecutive_failures)
+                return timestamps, values, (
+                    f"Stopped after {consecutive_failures} consecutive failed readings "
+                    f"at {timestamps[-1]:.2f} s: {failure}"
+                )
         return timestamps, values, None
 
     def _is_finished(self, start_time: float, deadline: float | None) -> bool:

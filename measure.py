@@ -5,7 +5,7 @@ Commands:
     python measure.py <address> range <function> <value>       Configure function + range
     python measure.py <address> adc [SLOW|MED|FAST]            Read or set the ADC rate
     python measure.py <address> reset                          Reset instrument
-    python measure.py <address> capture [duration] [timeout] [--save-samples]
+    python measure.py <address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]
                                                                Mean running DC current
     python measure.py --version                                Print the version
 
@@ -15,6 +15,9 @@ Arguments:
     delay      Optional wait in seconds before measuring (default: 0).
     duration   Capture window in seconds (default: 10).
     timeout    Optional. If omitted, timeout = duration + 10.
+    --save-samples  Also write the raw readings to capture_samples_<UTC date>.csv.
+    --save-plot     Also write the plot to capture_plot_<UTC date>.html.
+    --live          Draw the capture in a compact window while it runs.
 
 Output:
     Measure/capture write the value (or "ERR") to result.txt in the script directory.
@@ -28,8 +31,10 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable, Iterator, NamedTuple
 
 import pyvisa
 
@@ -41,7 +46,10 @@ from capture import (
     ContinuousCapture,
     InsufficientSamplesError,
 )
+from capture_plot import write_capture_plot
 from hmc8012 import HMC8012, RangeOverflowError, ScpiError
+from live_plot import LivePlot
+from live_window import LIVE_WINDOW_FLAG, open_live_window, run_live_window
 from version import __version__
 
 # sys.argv[0], not __file__: Nuitka onefile resolves __file__ to a temp extraction directory.
@@ -52,11 +60,25 @@ CAPTURE_TIMEOUT_MARGIN = 10.0
 # Prefix for raw capture samples file; name will be {prefix}_YYYY-MM-DD_HH-MM-SS.csv
 CAPTURE_SAMPLES_FILE_PREFIX = "capture_samples"
 SAVE_SAMPLES_FLAG = "--save-samples"
+SAVE_PLOT_FLAG = "--save-plot"
+LIVE_FLAG = "--live"
+CAPTURE_FLAGS = (SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
 VALID_ADC_RATES = ("SLOW", "MED", "FAST")
 # Captures always read at SLOW: the only rate with specified accuracy, and it averages the stepper ripple.
 CAPTURE_ADC_RATE = "SLOW"
 VALID_FUNCTIONS = sorted(HMC8012.VALID_FUNCTIONS)
 VALID_RANGE_FUNCTIONS = sorted(HMC8012.RANGE_SCPI_MAP.keys())
+
+
+class CaptureOptions(NamedTuple):
+    """Arguments of the capture command."""
+
+    duration: float
+    timeout: float
+    save_samples: bool
+    save_plot: bool
+    show_live: bool
+
 
 def cmd_measure(address: str, args: list[str]) -> None:
     """Handle: measure.py <address> <function> [delay]"""
@@ -195,46 +217,53 @@ def cmd_adc(address: str, args: list[str]) -> None:
 
 
 def cmd_capture(address: str, args: list[str]) -> None:
-    """Handle: measure.py <address> capture [duration] [timeout] [--save-samples]
+    """Handle: measure.py <address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]
 
     Runs continuous DCI capture at the SLOW ADC rate, analyzes the waveform for
     the mean running current and writes it to result.txt in the same format as
     a single-shot measure. Caller must set the range beforehand (e.g.
-    measure.py <address> range dci 2). With --save-samples the raw readings
-    are also written to capture_samples_<UTC date>.csv next to the script.
+    measure.py <address> range dci 2). Next to the script, --save-samples writes
+    the raw readings to capture_samples_<UTC date>.csv and --save-plot the plot
+    to capture_plot_<UTC date>.html; --live draws the capture in a compact window
+    while it runs. None of them changes what is written to result.txt.
     """
-    duration, timeout, save_samples = _parse_capture_args(args)
-
-    try:
-        result, analysis = _run_capture_session(
-            address, duration, timeout, samples_dir=SCRIPT_DIR if save_samples else None
-        )
-        write_result(str(analysis.stable_value))
-        print(
-            f"[APP] Capture: {result.sample_count} samples, stable value: {analysis.stable_value}",
-            file=sys.stderr,
-        )
-    except pyvisa.errors.VisaIOError as exc:
-        _write_error("Capture", "VISA/network", exc)
-        sys.exit(1)
-    except (ScpiError, RangeOverflowError, CaptureAbortedError) as exc:
-        _write_error("Capture", "instrument", exc)
-        sys.exit(1)
-    except CaptureConfigError as exc:
-        _write_error("Capture", "instrument config", exc)
-        sys.exit(1)
-    except InsufficientSamplesError as exc:
-        _write_error("Capture", "insufficient samples", exc)
-        sys.exit(1)
-    except AnalysisError as exc:
-        _write_error("Capture", "analysis", exc)
-        sys.exit(1)
-    except ValueError as exc:
-        _write_error("Capture", "input sanitization", exc)
-        sys.exit(1)
-    except Exception as exc:
-        _write_error("Capture", "unexpected", exc)
-        sys.exit(1)
+    options = _parse_capture_args(args)
+    with _live_plot(options.show_live) as live:
+        try:
+            result, analysis = _run_capture_session(
+                address,
+                options.duration,
+                options.timeout,
+                samples_dir=SCRIPT_DIR if options.save_samples else None,
+                plot_dir=SCRIPT_DIR if options.save_plot else None,
+                live=live,
+            )
+            write_result(str(analysis.stable_value))
+            print(
+                f"[APP] Capture: {result.sample_count} samples, stable value: {analysis.stable_value}",
+                file=sys.stderr,
+            )
+        except pyvisa.errors.VisaIOError as exc:
+            _write_error("Capture", "VISA/network", exc)
+            sys.exit(1)
+        except (ScpiError, RangeOverflowError, CaptureAbortedError) as exc:
+            _write_error("Capture", "instrument", exc)
+            sys.exit(1)
+        except CaptureConfigError as exc:
+            _write_error("Capture", "instrument config", exc)
+            sys.exit(1)
+        except InsufficientSamplesError as exc:
+            _write_error("Capture", "insufficient samples", exc)
+            sys.exit(1)
+        except AnalysisError as exc:
+            _write_error("Capture", "analysis", exc)
+            sys.exit(1)
+        except ValueError as exc:
+            _write_error("Capture", "input sanitization", exc)
+            sys.exit(1)
+        except Exception as exc:
+            _write_error("Capture", "unexpected", exc)
+            sys.exit(1)
 
 
 def _write_error(command: str, layer: str, exc: Exception) -> None:
@@ -252,25 +281,21 @@ def _write_error(command: str, layer: str, exc: Exception) -> None:
     write_result("ERR", app_msg, exc_detail)
 
 
-def _parse_capture_args(args: list[str]) -> tuple[float, float, bool]:
-    """Parse [duration] [timeout] [--save-samples] for the capture command.
+def _parse_capture_args(args: list[str]) -> CaptureOptions:
+    """Parse [duration] [timeout] and the capture flags, which may appear anywhere.
 
     If only duration is given, timeout = duration + CAPTURE_TIMEOUT_MARGIN.
-
-    Returns:
-        ``(duration, timeout, save_samples)``.
     """
-    save_samples = SAVE_SAMPLES_FLAG in args
-    numbers = [arg for arg in args if arg != SAVE_SAMPLES_FLAG]
+    numbers = [arg for arg in args if arg not in CAPTURE_FLAGS]
     if len(numbers) > 2:
-        _usage_error("capture takes at most [duration] [timeout] and --save-samples.")
+        _usage_error(f"capture takes at most [duration] [timeout] and the flags {', '.join(CAPTURE_FLAGS)}.")
     duration = _positive_number(numbers[0], "Capture duration") if numbers else 10.0
-    if len(numbers) < 2:
-        return duration, duration + CAPTURE_TIMEOUT_MARGIN, save_samples
-    timeout = _positive_number(numbers[1], "Timeout")
-    if timeout < duration:
-        _usage_error("Timeout must be >= capture duration.")
-    return duration, timeout, save_samples
+    timeout = duration + CAPTURE_TIMEOUT_MARGIN
+    if len(numbers) == 2:
+        timeout = _positive_number(numbers[1], "Timeout")
+        if timeout < duration:
+            _usage_error("Timeout must be >= capture duration.")
+    return CaptureOptions(duration, timeout, SAVE_SAMPLES_FLAG in args, SAVE_PLOT_FLAG in args, LIVE_FLAG in args)
 
 
 def _positive_number(text: str, name: str) -> float:
@@ -283,33 +308,62 @@ def _positive_number(text: str, name: str) -> float:
     return value
 
 
+@dataclass(frozen=True)
+class _CaptureOutputs:
+    """Diagnostic outputs of one capture; none of them changes its outcome."""
+
+    started_at: datetime
+    samples_dir: Path | None
+    plot_dir: Path | None
+    live: LivePlot | None
+
+
 def _run_capture_session(
     address: str,
     duration: float,
     timeout: float,
     samples_dir: Path | None = None,
+    plot_dir: Path | None = None,
+    live: LivePlot | None = None,
 ) -> tuple[CaptureResult, AnalysisResult]:
     """Execute one capture session at the SLOW ADC rate and return capture + analysis results.
 
     The instrument's previous ADC rate is restored afterwards, so a capture
-    never changes the settings of later measurements. When *samples_dir* is
-    given, the raw samples are written there before the analysis runs, so a
-    failed capture can still be diagnosed.
+    never changes the settings of later measurements. The diagnostic outputs
+    (samples CSV in *samples_dir*, plot page in *plot_dir*, the *live* plot)
+    get the readings and the outcome also when the capture fails.
     """
+    outputs = _CaptureOutputs(datetime.now(timezone.utc), samples_dir, plot_dir, live)
+    result = None
+    try:
+        result = _acquire_capture(address, duration, timeout, live.add_sample if live else None)
+        analysis = _analyze_capture(result)
+    except Exception as exc:
+        captured = exc.result if isinstance(exc, InsufficientSamplesError) else result
+        _save_capture_outputs(outputs, captured, error=exc)
+        raise
+    _save_capture_outputs(outputs, result, analysis=analysis)
+    return result, analysis
+
+
+def _acquire_capture(
+    address: str,
+    duration: float,
+    timeout: float,
+    on_sample: Callable[[float, float], None] | None,
+) -> CaptureResult:
+    """Read DC current at the SLOW ADC rate for *duration* s, then restore the previous rate."""
     with HMC8012(address) as dmm:
         dmm.set_function("dci")
         with _temporary_adc_rate(dmm, CAPTURE_ADC_RATE):
             capture = ContinuousCapture(dmm, max_duration=duration)
-            try:
-                result = capture.run(deadline=time.monotonic() + timeout)
-            except InsufficientSamplesError as exc:
-                _save_capture_samples(exc.result, samples_dir)
-                raise
-    _save_capture_samples(result, samples_dir)
+            return capture.run(deadline=time.monotonic() + timeout, on_sample=on_sample)
+
+
+def _analyze_capture(result: CaptureResult) -> AnalysisResult:
     if result.aborted_reason is not None:
         raise CaptureAbortedError(result.aborted_reason)
-    analysis = analyze_waveform(result.timestamps, result.values)
-    return result, analysis
+    return analyze_waveform(result.timestamps, result.values)
 
 
 @contextmanager
@@ -333,23 +387,76 @@ def _restore_adc_rate(dmm: HMC8012, rate: str) -> None:
         print(f"[APP] Could not restore ADC rate {rate}: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
-def _save_capture_samples(result: CaptureResult, samples_dir: Path | None) -> None:
-    if samples_dir is None or len(result.timestamps) == 0:
+@contextmanager
+def _live_plot(is_enabled: bool) -> Iterator[LivePlot | None]:
+    """Serve the live plot and open its window for the block; None when not asked for or unavailable."""
+    live = _start_live_plot() if is_enabled else None
+    try:
+        yield live
+    finally:
+        if live is not None:
+            live.close()
+
+
+def _start_live_plot() -> LivePlot | None:
+    live = LivePlot()
+    try:
+        live.start()
+    except OSError as exc:
+        print(f"[APP] Live plot unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+    print(f"[APP] Live plot at {live.url}", file=sys.stderr)
+    try:
+        open_live_window(live.url)
+    except OSError as exc:
+        print(f"[APP] Could not open the live window ({type(exc).__name__}: {exc}); open the address by hand.",
+              file=sys.stderr)
+    return live
+
+
+def _save_capture_outputs(
+    outputs: _CaptureOutputs,
+    result: CaptureResult | None,
+    analysis: AnalysisResult | None = None,
+    error: Exception | None = None,
+) -> None:
+    """Hand the outcome to the diagnostic outputs that were asked for."""
+    if outputs.live is not None:
+        outputs.live.finish(outputs.started_at, analysis=analysis, error=error)
+    if result is None or len(result.timestamps) == 0:
         return
-    samples_path = write_capture_samples(result, samples_dir)
-    print(f"[APP] Raw samples written to: {samples_path}", file=sys.stderr)
+    if outputs.samples_dir is not None:
+        _write_capture_output(
+            "capture samples", lambda: write_capture_samples(result, outputs.samples_dir, outputs.started_at)
+        )
+    if outputs.plot_dir is not None:
+        _write_capture_output("capture plot", lambda: write_capture_plot(
+            outputs.plot_dir, result.timestamps, result.values, outputs.started_at, analysis, error
+        ))
+
+
+def _write_capture_output(name: str, write: Callable[[], Path]) -> None:
+    """Run one diagnostic writer; a failure is reported on stderr and never replaces the capture outcome."""
+    try:
+        path = write()
+    except Exception as exc:
+        print(f"[APP] Could not write the {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return
+    print(f"[APP] {name.capitalize()} written to: {path}", file=sys.stderr)
 
 
 def write_capture_samples(
     result: CaptureResult,
     output_dir: Path = SCRIPT_DIR,
+    captured_at: datetime | None = None,
 ) -> Path:
     """Write all raw captured samples (no filtering) to a CSV with measurement date in the filename.
 
-    Filename: capture_samples_YYYY-MM-DD_HH-MM-SS.csv. First line is a comment with
-    the measurement date/time (UTC). Then header 'time_s,value_A' and one line per sample.
+    Filename: capture_samples_YYYY-MM-DD_HH-MM-SS.csv, from *captured_at* (UTC, default
+    now). First line is a comment with that date/time. Then header 'time_s,value_A' and
+    one line per sample.
     """
-    now = datetime.now(timezone.utc)
+    now = captured_at or datetime.now(timezone.utc)
     name = f"{CAPTURE_SAMPLES_FILE_PREFIX}_{now.strftime('%Y-%m-%d_%H-%M-%S')}.csv"
     path = output_dir / name
     with open(path, "w", encoding="utf-8") as f:
@@ -416,7 +523,7 @@ def _usage_error(message: str) -> None:
         "  python measure.py <address> range <function> <value>       Set range\n"
         "  python measure.py <address> adc [SLOW|MED|FAST]            Read or set the ADC rate\n"
         "  python measure.py <address> reset                          Reset\n"
-        "  python measure.py <address> capture [duration] [timeout] [--save-samples]\n"
+        "  python measure.py <address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]\n"
         "                                                             Mean running DC current\n"
         f"  python measure.py --version                                Version ({__version__})",
         file=sys.stderr,
@@ -433,6 +540,10 @@ def main() -> None:
     args = sys.argv[1:]
     if args == ["--version"]:
         print(__version__)
+        return
+    # Internal: the live plot window process started by capture --live; it never touches result.txt.
+    if len(args) == 2 and args[0] == LIVE_WINDOW_FLAG:
+        run_live_window(args[1])
         return
     clear_result()
 

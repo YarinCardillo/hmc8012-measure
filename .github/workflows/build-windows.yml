@@ -35,7 +35,9 @@ jobs:
         run: >
           python -m nuitka --onefile --assume-yes-for-downloads
           --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py
-          --include-package=serial
+          --include-package=serial --include-data-dir=plot_assets=plot_assets --enable-plugin=pywebview
+          --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite --noinclude-pytest-mode=nofollow
+          --report=nuitka-report.xml
           --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI"
           --file-version=${{ steps.version.outputs.number }} --product-version=${{ steps.version.outputs.number }}
           measure.py
@@ -53,6 +55,20 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "hmc.exe accepted an invalid range command" }
           $first = Get-Content result.txt -TotalCount 1
           if ($first -ne "ERR") { throw "result.txt first line is '$first', expected ERR" }
+          # --save-plot and --live read these files from inside the executable at run time.
+          foreach ($asset in "capture_plot.html", "uPlot.iife.min.js", "uPlot.min.css") {
+            $pattern = "<data_file name=`"plot_assets[\\/]$([regex]::Escape($asset))`""
+            if (-not (Select-String -Path nuitka-report.xml -Pattern $pattern -Quiet)) { throw "hmc.exe does not bundle plot_assets/$asset" }
+          }
+          # The live window process must open a WebView2 window and stay up; without a web view it falls back
+          # to a browser tab and exits.
+          $window = Start-Process -FilePath .\hmc.exe -ArgumentList "--live-window", "http://127.0.0.1:9/" -PassThru -NoNewWindow -RedirectStandardError live-window-stderr.txt
+          Start-Sleep -Seconds 20
+          if ($window.HasExited) {
+            Get-Content live-window-stderr.txt
+            throw "the live window process exited with code $($window.ExitCode)"
+          }
+          Stop-Process -Id $window.Id -Force
           exit 0
 
       - uses: actions/upload-artifact@v7
