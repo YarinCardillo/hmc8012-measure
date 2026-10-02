@@ -1,24 +1,27 @@
 """CLI entry point for HMC8012 multimeter operations.
 
 Commands:
-    python measure.py <address> <function> [delay]             Measure (READ? only)
+    python measure.py <address> <function> [--delay S]         One reading (READ?)
+    python measure.py <address> <function> --time S [--timeout S] [capture flags]
+                                                               Capture for S seconds, mean running value
+    python measure.py <address> <function> --auto [--timeout S] [capture flags]
+                                                               Capture until the device is back at idle
     python measure.py <address> range <function> <value>       Configure function + range
     python measure.py <address> adc [SLOW|MED|FAST]            Read or set the ADC rate
     python measure.py <address> reset                          Reset instrument
-    python measure.py <address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]
-                                                               Mean running DC current
     python measure.py --version                                Print the version
 
 Arguments:
     address    IP address (e.g. 192.168.0.2) or COM port (e.g. COM3)
     function   Measurement type: dcv|acv|dci|aci|res|fres|cap|temp|freq|cont|diod
-    delay      Optional wait in seconds before measuring (default: 0).
-    duration   Capture window in seconds. If omitted, the capture stops by itself
-               once the device has run and is back at idle (at most 30 s).
-    timeout    Optional. If omitted, timeout = duration + 10.
+               (captures: dcv|acv|dci|aci)
+    --delay S       Wait S seconds before the single reading (default: 0).
+    --time S        Capture for S seconds.
+    --auto          Capture until the device has run and is back at idle (at most 30 s).
+    --timeout S     Capture deadline; default: capture length + 10.
     --save-samples  Also write the raw readings to capture_samples_<UTC date>.csv.
     --save-plot     Also write the plot to capture_plot_<UTC date>.html.
-    --live          Draw the capture in a compact window while it runs.
+    --live          Draw the capture in a small window while it runs.
 
 Output:
     Measure/capture write the value (or "ERR") to result.txt in the script directory.
@@ -41,6 +44,7 @@ import pyvisa
 
 from analyzer import AnalysisError, AnalysisResult, analyze_waveform
 from capture import (
+    CAPTURE_FUNCTION_REPLIES,
     CaptureAbortedError,
     CaptureConfigError,
     CaptureResult,
@@ -63,10 +67,16 @@ CAPTURE_TIMEOUT_MARGIN = 10.0
 AUTO_STOP_MAX_DURATION_S = 30.0
 # Prefix for raw capture samples file; name will be {prefix}_YYYY-MM-DD_HH-MM-SS.csv
 CAPTURE_SAMPLES_FILE_PREFIX = "capture_samples"
+DELAY_FLAG = "--delay"
+TIME_FLAG = "--time"
+TIMEOUT_FLAG = "--timeout"
+AUTO_FLAG = "--auto"
 SAVE_SAMPLES_FLAG = "--save-samples"
 SAVE_PLOT_FLAG = "--save-plot"
 LIVE_FLAG = "--live"
-CAPTURE_FLAGS = (SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
+VALUE_FLAGS = (DELAY_FLAG, TIME_FLAG, TIMEOUT_FLAG)
+SWITCH_FLAGS = (AUTO_FLAG, SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
+CAPTURE_ONLY_FLAGS = (TIMEOUT_FLAG, SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
 VALID_ADC_RATES = ("SLOW", "MED", "FAST")
 # Captures always read at SLOW: the only rate with specified accuracy, and it averages the stepper ripple.
 CAPTURE_ADC_RATE = "SLOW"
@@ -75,7 +85,7 @@ VALID_RANGE_FUNCTIONS = sorted(HMC8012.RANGE_SCPI_MAP.keys())
 
 
 class CaptureOptions(NamedTuple):
-    """Arguments of the capture command."""
+    """Arguments of a capture (--time or --auto)."""
 
     duration: float
     timeout: float
@@ -85,23 +95,29 @@ class CaptureOptions(NamedTuple):
     stop_on_idle: bool
 
 
+class MeasureOptions(NamedTuple):
+    """Arguments after the function: a single reading after *delay*, or a capture."""
+
+    delay: float
+    capture: CaptureOptions | None
+
+
 def cmd_measure(address: str, args: list[str]) -> None:
-    """Handle: measure.py <address> <function> [delay]"""
+    """Handle: measure.py <address> <function> [--delay S | --time S | --auto] [capture flags]
+
+    Without --time or --auto, one reading after the optional delay; with
+    them, a capture of the function (see cmd_capture).
+    """
     function = args[0]
-    delay = 0.0
+    options = _parse_measure_args(function, args[1:])
+    if options.capture is not None:
+        cmd_capture(address, function, options.capture)
+        return
+    _measure_once(address, function, options.delay)
 
-    if len(args) >= 2:
-        try:
-            delay = float(args[1])
-        except ValueError:
-            # Ignore non-numeric trailing arguments (e.g. stray quotes)
-            print(
-                f"[APP] Ignoring non-numeric argument '{args[1]}', using delay=0.",
-                file=sys.stderr,
-            )
-        if delay < 0:
-            _usage_error(f"Delay must be >= 0, got {delay}.")
 
+def _measure_once(address: str, function: str, delay: float) -> None:
+    """One READ? of *function* after *delay* seconds; writes the value or ERR."""
     try:
         with HMC8012(address) as dmm:
             dmm.set_function(function)
@@ -221,19 +237,19 @@ def cmd_adc(address: str, args: list[str]) -> None:
         sys.exit(1)
 
 
-def cmd_capture(address: str, args: list[str]) -> None:
-    """Handle: measure.py <address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]
+def cmd_capture(address: str, function: str, options: CaptureOptions) -> None:
+    """Handle: measure.py <address> <function> (--time S | --auto) [--timeout S] [capture flags]
 
-    Runs continuous DCI capture at the SLOW ADC rate, analyzes the waveform for
-    the mean running current and writes it to result.txt in the same format as
-    a single-shot measure. Without a duration the capture stops by itself once
-    the device has run and is back at idle. Caller must set the range beforehand (e.g.
-    measure.py <address> range dci 2). Next to the script, --save-samples writes
-    the raw readings to capture_samples_<UTC date>.csv and --save-plot the plot
-    to capture_plot_<UTC date>.html; --live draws the capture in a compact window
-    while it runs. None of them changes what is written to result.txt.
+    Captures *function* (dci, dcv, aci or acv) at the SLOW ADC rate, analyzes
+    the waveform for the mean running value and writes it to result.txt in the
+    same format as a single reading. With --auto the capture stops by itself
+    once the device has run and is back at idle. Caller must set the range
+    beforehand (e.g. measure.py <address> range dci 2). Next to the script,
+    --save-samples writes the raw readings to capture_samples_<UTC date>.csv
+    and --save-plot the plot to capture_plot_<UTC date>.html; --live draws the
+    capture in a small window while it runs. None of them changes what is
+    written to result.txt.
     """
-    options = _parse_capture_args(args)
     with _live_plot(options.show_live) as live:
         try:
             result, analysis = _run_capture_session(
@@ -244,6 +260,7 @@ def cmd_capture(address: str, args: list[str]) -> None:
                 plot_dir=SCRIPT_DIR if options.save_plot else None,
                 live=live,
                 stop_on_idle=options.stop_on_idle,
+                function=function,
             )
             write_result(str(analysis.stable_value))
             print(
@@ -288,34 +305,80 @@ def _write_error(command: str, layer: str, exc: Exception) -> None:
     write_result("ERR", app_msg, exc_detail)
 
 
-def _parse_capture_args(args: list[str]) -> CaptureOptions:
-    """Parse [duration] [timeout] and the capture flags, which may appear anywhere.
+def _parse_measure_args(function: str, args: list[str]) -> MeasureOptions:
+    """Parse the flags after the function, in any order.
 
-    Without a duration the capture stops on idle, for at most AUTO_STOP_MAX_DURATION_S.
-    If no timeout is given, timeout = duration + CAPTURE_TIMEOUT_MARGIN.
+    --time or --auto make it a capture; otherwise it is a single reading after
+    the optional --delay. Invalid combinations are usage errors.
     """
-    numbers = [arg for arg in args if arg not in CAPTURE_FLAGS]
-    if len(numbers) > 2:
-        _usage_error(f"capture takes at most [duration] [timeout] and the flags {', '.join(CAPTURE_FLAGS)}.")
-    duration = _positive_number(numbers[0], "Capture duration") if numbers else AUTO_STOP_MAX_DURATION_S
+    flags = _read_flags(args)
+    if TIME_FLAG not in flags and AUTO_FLAG not in flags:
+        capture_flags = [flag for flag in CAPTURE_ONLY_FLAGS if flag in flags]
+        if capture_flags:
+            _usage_error(f"{', '.join(capture_flags)}: only for a capture ({TIME_FLAG} or {AUTO_FLAG}).")
+        return MeasureOptions(_non_negative_number(flags.get(DELAY_FLAG) or "0", DELAY_FLAG), None)
+    if DELAY_FLAG in flags:
+        _usage_error(f"{DELAY_FLAG} applies to a single reading, not to a capture.")
+    return MeasureOptions(0.0, _parse_capture_options(function, flags))
+
+
+def _parse_capture_options(function: str, flags: dict[str, str | None]) -> CaptureOptions:
+    """--time S or --auto (at most AUTO_STOP_MAX_DURATION_S); timeout defaults to length + CAPTURE_TIMEOUT_MARGIN."""
+    if TIME_FLAG in flags and AUTO_FLAG in flags:
+        _usage_error(f"{TIME_FLAG} and {AUTO_FLAG} exclude each other.")
+    if function not in CAPTURE_FUNCTION_REPLIES:
+        _usage_error(f"Capture is available for {', '.join(CAPTURE_FUNCTION_REPLIES)} only, got '{function}'.")
+    is_auto = AUTO_FLAG in flags
+    duration = AUTO_STOP_MAX_DURATION_S if is_auto else _positive_number(flags[TIME_FLAG], TIME_FLAG)
     timeout = duration + CAPTURE_TIMEOUT_MARGIN
-    if len(numbers) == 2:
-        timeout = _positive_number(numbers[1], "Timeout")
+    if TIMEOUT_FLAG in flags:
+        timeout = _positive_number(flags[TIMEOUT_FLAG], TIMEOUT_FLAG)
         if timeout < duration:
             _usage_error("Timeout must be >= capture duration.")
     return CaptureOptions(
-        duration, timeout, SAVE_SAMPLES_FLAG in args, SAVE_PLOT_FLAG in args, LIVE_FLAG in args, not numbers
+        duration, timeout, SAVE_SAMPLES_FLAG in flags, SAVE_PLOT_FLAG in flags, LIVE_FLAG in flags, is_auto
     )
 
 
+def _read_flags(args: list[str]) -> dict[str, str | None]:
+    """Map each flag to its value (None for a switch).
+
+    Blank or quote-only arguments, which a host program can pass by mistake, are ignored.
+    """
+    flags: dict[str, str | None] = {}
+    tokens = iter(arg for arg in args if arg.strip().strip('"'))
+    for token in tokens:
+        if token in SWITCH_FLAGS:
+            flags[token] = None
+        elif token in VALUE_FLAGS:
+            value = next(tokens, None)
+            if value is None:
+                _usage_error(f"{token} needs a value in seconds.")
+            flags[token] = value
+        else:
+            _usage_error(f"Unknown argument '{token}'. Expected {', '.join(VALUE_FLAGS + SWITCH_FLAGS)}.")
+    return flags
+
+
 def _positive_number(text: str, name: str) -> float:
-    try:
-        value = float(text)
-    except ValueError:
-        _usage_error(f"{name} must be a number, got '{text}'.")
+    value = _number(text, name)
     if value <= 0:
         _usage_error(f"{name} must be positive.")
     return value
+
+
+def _non_negative_number(text: str, name: str) -> float:
+    value = _number(text, name)
+    if value < 0:
+        _usage_error(f"{name} must be >= 0, got {value}.")
+    return value
+
+
+def _number(text: str, name: str) -> float:
+    try:
+        return float(text)
+    except ValueError:
+        _usage_error(f"{name} must be a number, got '{text}'.")
 
 
 @dataclass(frozen=True)
@@ -336,6 +399,7 @@ def _run_capture_session(
     plot_dir: Path | None = None,
     live: LivePlot | None = None,
     stop_on_idle: bool = False,
+    function: str = "dci",
 ) -> tuple[CaptureResult, AnalysisResult]:
     """Execute one capture session at the SLOW ADC rate and return capture + analysis results.
 
@@ -350,7 +414,9 @@ def _run_capture_session(
     outputs = _CaptureOutputs(datetime.now(timezone.utc), samples_dir, plot_dir, live)
     result = None
     try:
-        result = _acquire_capture(address, duration, timeout, live.add_sample if live else None, stop_on_idle)
+        result = _acquire_capture(
+            address, function, duration, timeout, live.add_sample if live else None, stop_on_idle
+        )
         analysis = _analyze_capture(result)
     except Exception as exc:
         captured = exc.result if isinstance(exc, InsufficientSamplesError) else result
@@ -362,17 +428,18 @@ def _run_capture_session(
 
 def _acquire_capture(
     address: str,
+    function: str,
     duration: float,
     timeout: float,
     on_sample: Callable[[float, float], None] | None,
     stop_on_idle: bool,
 ) -> CaptureResult:
-    """Read DC current at the SLOW ADC rate for *duration* s, or until back at idle, then restore the previous rate."""
+    """Read *function* at the SLOW ADC rate for *duration* s, or until back at idle, then restore the previous rate."""
     should_stop = StopDetector().should_stop if stop_on_idle else None
     with HMC8012(address) as dmm:
-        dmm.set_function("dci")
+        dmm.set_function(function)
         with _temporary_adc_rate(dmm, CAPTURE_ADC_RATE):
-            capture = ContinuousCapture(dmm, max_duration=duration)
+            capture = ContinuousCapture(dmm, function=function, max_duration=duration)
             return capture.run(deadline=time.monotonic() + timeout, on_sample=on_sample, should_stop=should_stop)
 
 
@@ -535,13 +602,13 @@ def _usage_error(message: str) -> None:
     print(f"[APP] Error: {message}", file=sys.stderr)
     print(
         "Usage:\n"
-        "  python measure.py <address> <function> [delay]             Measure\n"
+        "  python measure.py <address> <function> [--delay S]         One reading\n"
+        "  python measure.py <address> <function> --time S            Capture for S seconds (dcv, acv, dci, aci)\n"
+        "  python measure.py <address> <function> --auto              Capture until back at idle (at most 30 s)\n"
+        "      capture flags: [--timeout S] [--save-samples] [--save-plot] [--live]\n"
         "  python measure.py <address> range <function> <value>       Set range\n"
         "  python measure.py <address> adc [SLOW|MED|FAST]            Read or set the ADC rate\n"
         "  python measure.py <address> reset                          Reset\n"
-        "  python measure.py <address> capture [duration] [timeout] [--save-samples] [--save-plot] [--live]\n"
-        "                                                             Mean running DC current; without a duration\n"
-        "                                                             it stops once the device is back at idle\n"
         f"  python measure.py --version                                Version ({__version__})",
         file=sys.stderr,
     )
@@ -558,7 +625,7 @@ def main() -> None:
     if args == ["--version"]:
         print(__version__)
         return
-    # Internal: the live plot window process started by capture --live; it never touches result.txt.
+    # Internal: the live plot window process started by a --live capture; it never touches result.txt.
     if len(args) == 2 and args[0] == LIVE_WINDOW_FLAG:
         run_live_window(args[1])
         return
@@ -581,9 +648,6 @@ def main() -> None:
     elif command == "adc":
         cmd_adc(address, args[2:])
 
-    elif command == "capture":
-        cmd_capture(address, args[2:])
-
     elif command in HMC8012.VALID_FUNCTIONS:
         cmd_measure(address, [command] + args[2:])
 
@@ -591,7 +655,7 @@ def main() -> None:
         _usage_error(
             f"Unknown command '{command}'. "
             f"Expected a function ({', '.join(VALID_FUNCTIONS)}), "
-            "'range', 'adc', 'reset', or 'capture'."
+            "'range', 'adc' or 'reset'."
         )
 
 

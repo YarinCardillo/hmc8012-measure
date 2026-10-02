@@ -1,6 +1,6 @@
 # HMC8012 Measurement Layer
 
-Command-line tool for the Rohde & Schwarz HMC8012 digital multimeter, called by a host program (a VBA macro). Each call does one job, writes its outcome to `result.txt` next to the executable, and exits. Besides instantaneous readings, `capture` records the supply current of a motor while it runs and reports its mean running current, handling the inrush peak and noise. Without a duration, the capture stops by itself once the motor has stopped. On request it also draws the capture, live in a compact window or saved as a page.
+Command-line tool for the Rohde & Schwarz HMC8012 digital multimeter, called by a host program (a VBA macro). Each call does one job, writes its outcome to `result.txt` next to the executable, and exits. Besides single readings, a capture (`--time` or `--auto`) records the supply current of a motor while it runs and reports its mean running current, handling the inrush peak and noise. With `--auto` the capture stops by itself once the motor has stopped. On request it also draws the capture, live in a compact window or saved as a page.
 
 Italian version: [README_ita.md](README_ita.md).
 
@@ -9,10 +9,11 @@ Italian version: [README_ita.md](README_ita.md).
 | Command | What it does |
 |-|-|
 | `hmc.exe 192.168.0.2 dci` | One DC current reading |
+| `hmc.exe 192.168.0.2 dci --delay 1.5` | Waits 1.5 s, then one DC current reading |
 | `hmc.exe 192.168.0.2 range dci 2` | DC current, 2 A range, kept until changed |
-| `hmc.exe 192.168.0.2 capture` | Capture that stops by itself 3 s after the motor stops (at most 30 s): start it, then move the motor |
-| `hmc.exe 192.168.0.2 capture 10` | Capture of exactly 10 s |
-| `hmc.exe 192.168.0.2 capture --live` | Capture plotted live in a small window |
+| `hmc.exe 192.168.0.2 dci --auto` | Capture that stops by itself 3 s after the motor stops (at most 30 s): start it, then move the motor |
+| `hmc.exe 192.168.0.2 dci --time 10` | Capture of exactly 10 s |
+| `hmc.exe 192.168.0.2 dci --auto --live` | Capture plotted live in a small window |
 | `hmc.exe --version` | Version of this executable |
 
 The outcome is in `result.txt` next to `hmc.exe`: the value in amperes, `OK`, or `ERR`.
@@ -36,22 +37,24 @@ On Windows, activate the environment with `venv\Scripts\activate`.
 
 | Command | What it does | `result.txt` |
 |-|-|-|
-| `<address> <function> [delay]` | One reading with the current settings, after an optional delay in seconds | value or `ERR` |
+| `<address> <function> [--delay S]` | One reading with the current settings, after an optional wait of S seconds | value or `ERR` |
+| `<address> <function> --time S [flags]` | Capture of S seconds; reports the mean running value. See [Capture](#capture) | value or `ERR` |
+| `<address> <function> --auto [flags]` | Capture that stops by itself once the motor is back at idle (at most 30 s). See [Capture](#capture) | value or `ERR` |
 | `<address> range <function> <value>` | Selects the function and its range; kept until the next `range` or `reset` | `OK` or `ERR` |
 | `<address> adc` | Reads the ADC rate of the active function | `SLOW`, `MED`, `FAST` or `ERR` |
 | `<address> adc <SLOW\|MED\|FAST>` | Sets the ADC rate of the active function (the one selected last) | `OK` or `ERR` |
 | `<address> reset` | Restores factory defaults (ADC rate SLOW, auto-range on) | `OK` or `ERR` |
-| `<address> capture [duration] [timeout] [flags]` | Records DC current and reports the mean running current. Without `duration` it stops by itself once the motor is back at idle (at most 30 s); with it, it records for `duration` s. See [Capture](#capture) | value or `ERR` |
 | `--version` | Prints the version on the console | unchanged |
 
 ### Capture
 
-- Without `duration`, the capture stops 3 s after the current is back at the idle level it started from, provided the motor ran for at least 0.5 s first. Pauses shorter than 3 s inside one movement do not stop it. If the motor never stops, the capture ends at 30 s.
-- `timeout` defaults to `duration + 10` s (40 s without `duration`).
+- Captures work for `dci`, `dcv`, `aci` and `acv`; the analysis is designed for the DC supply current of a motor (`dci`).
+- With `--auto`, the capture stops 3 s after the value is back at the idle level it started from, provided the motor ran for at least 0.5 s first. Pauses shorter than 3 s inside one movement do not stop it. If the motor never stops, the capture ends at 30 s.
+- `--timeout S` sets the capture deadline; it defaults to the capture length plus 10 s (40 s with `--auto`).
 - The capture always reads at the SLOW ADC rate. If the instrument is at another rate, capture switches to SLOW and restores the previous rate at the end, also when it fails, so later measurements keep their settings.
-- Set the DC current range with `range` first: capture refuses auto-range.
+- Set the range of the function with `range` first: capture refuses auto-range.
 
-Flags for diagnosis, off by default, in any combination and position:
+Diagnostic flags of a capture, off by default, in any combination and order:
 
 | Flag | What it adds |
 |-|-|
@@ -103,7 +106,7 @@ Flags for diagnosis, off by default, in any combination and position:
 | `input sanitization` | Invalid argument |
 | `unexpected` | Anything else; `[EXC]` has the details |
 
-**Timing.** Every command first pays the start-up of `hmc.exe` (the single-file executable unpacks itself; typically a few seconds, to be measured on the lab PC). A capture then takes `duration` seconds (without one, until 3 s after the motor stops) plus the analysis (well under 0.1 s).
+**Timing.** Every command first pays the start-up of `hmc.exe` (the single-file executable unpacks itself; typically a few seconds, to be measured on the lab PC). A capture then takes the `--time` seconds (with `--auto`, until 3 s after the motor stops) plus the analysis (well under 0.1 s).
 
 For an instantaneous reading, wait for the process to end, then read the file:
 
@@ -122,7 +125,7 @@ Const RESULT_FILE As String = "C:\hmc\result.txt"
 Dim sh As Object, deadline As Date
 If Dir(RESULT_FILE) <> "" Then Kill RESULT_FILE
 Set sh = CreateObject("WScript.Shell")
-sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 capture", 0, False
+sh.Run """C:\hmc\hmc.exe"" 192.168.0.2 dci --auto", 0, False
 ' Start the motor here.
 deadline = Now + TimeSerial(0, 0, 45)
 Do While Dir(RESULT_FILE) = "" And Now < deadline
@@ -132,11 +135,11 @@ Loop
 
 - Delete the old `result.txt` first. `hmc.exe` deletes it too, but only after its start-up; until then a stale value from the previous command would still be there.
 - `False` makes `Run` return at once, so the motor can start while the capture runs.
-- The 45 s deadline covers the longest capture (30 s), the start-up and a margin; for a fixed `capture 10`, 30 s are enough. No file after the deadline means the capture did not finish.
+- The 45 s deadline covers the longest capture (30 s), the start-up and a margin; for `dci --time 10`, 30 s are enough. No file after the deadline means the capture did not finish.
 - `result.txt` is written in one step, so once it exists it is complete: line 1 is the value or `ERR`.
 - Parse numbers with `Val()`, which always expects a decimal point. `CDbl` follows the Windows locale and expects a comma on Italian systems.
 
-**One capture, one movement.** Start the capture at least 1 s before the motor moves (the analysis needs the idle current first). With a fixed duration, let the motor stop before the capture ends; without one, the capture waits for it.
+**One capture, one movement.** Start the capture at least 1 s before the motor moves (the analysis needs the idle current first). With `--time`, let the motor stop before the capture ends; with `--auto`, the capture waits for it.
 
 ## How the capture value is computed
 
@@ -162,7 +165,8 @@ Loop
 - A periodic load whose period divides the 200 ms SLOW conversion period can alias if the ADC aperture is shorter than the conversion period (not stated in the manual). Fast ripple (stepper steps, driver PWM) is averaged within each conversion.
 - Loads that vary over tenths of a second give few distinct readings at 5 per second and often end in `ImpreciseValueError`; a longer run helps.
 - A different level shorter than about `max_settle_s` at the start or end of the run is trimmed away as if it were a transient.
-- A pause inside one movement (current back at idle, then running again) ends in `ERR`. Without a duration, a pause of 3 s or more also ends the capture.
+- A pause inside one movement (current back at idle, then running again) ends in `ERR`. With `--auto`, a pause of 3 s or more also ends the capture.
+- `dcv`, `aci` and `acv` captures use the same analysis as the DC current: they work only when the value rises while the motor runs, the minimum tolerance stays 0.002 in the unit of the function, and the error messages speak of current. The `FUNC?` replies of the AC functions (`CURR:AC`, `VOLT:AC`) are not verified on the instrument; a different reply stops the capture with `instrument config`.
 
 ## Developer guide
 
@@ -183,10 +187,10 @@ flowchart LR
     TESTS -.-> ANA
 ```
 
-What a `capture` does:
+What a capture (`--time` or `--auto`) does:
 
-1. `measure.py` opens the instrument (`hmc8012.py`), selects DC current and switches to SLOW if needed.
-2. `capture.py` polls `READ?` until the duration ends or, without one, until `stop_detector.py` sees the motor back at idle. Failed readings stay as NaN; five in a row stop the capture.
+1. `measure.py` opens the instrument (`hmc8012.py`), selects the function and switches to SLOW if needed.
+2. `capture.py` polls `READ?` until the `--time` ends or, with `--auto`, until `stop_detector.py` sees the motor back at idle. Failed readings stay as NaN; five in a row stop the capture.
 3. The previous ADC rate is restored.
 4. `analyzer.py` computes the value and `measure.py` writes `result.txt`.
 
@@ -197,7 +201,7 @@ With `--live`, each reading also goes to `live_plot.py`, which streams it to the
 | `measure.py` | CLI dispatch, `result.txt`, error layers | `main`, `cmd_*`, `write_result`, `clear_result` |
 | `hmc8012.py` | SCPI over PyVISA (LAN socket or COM); every setter checks `SYST:ERR?` | `HMC8012`, `ScpiError`, `RangeOverflowError` |
 | `capture.py` | Timed polling loop, failure counting | `ContinuousCapture`, `CaptureResult` |
-| `stop_detector.py` | Auto-stop: ends a capture without duration once the motor has run and is back at idle | `StopDetector` |
+| `stop_detector.py` | Auto-stop: ends an `--auto` capture once the motor has run and is back at idle | `StopDetector` |
 | `analyzer.py` | Idle, run, averaging window, precision; raises instead of guessing | `analyze_waveform`, `AnalysisConfig`, `AnalysisResult`, error classes |
 | `capture_plot.py` | Plot page of a capture (saved or live), from `plot_assets/` | `render_capture_plot`, `write_capture_plot`, `render_live_page` |
 | `live_plot.py` | Serves the live page on `127.0.0.1` and streams the readings | `LivePlot` |
@@ -215,9 +219,10 @@ Docstrings in each module are the reference for arguments, returns and raised er
 |-|-|
 | Analysis tuning (smoothing window, minimum run, trims, tolerance) | `AnalysisConfig` defaults in `analyzer.py` |
 | ADC rate of captures | `CAPTURE_ADC_RATE` in `measure.py` |
+| Functions a capture supports | `CAPTURE_FUNCTION_REPLIES` in `capture.py` |
 | Failed readings that stop a capture | `DEFAULT_MAX_CONSECUTIVE_FAILURES` in `capture.py` |
-| Idle time that ends a capture without duration | `STOP_HOLD_S` in `stop_detector.py` |
-| Longest capture without duration | `AUTO_STOP_MAX_DURATION_S` in `measure.py` |
+| Idle time that ends an `--auto` capture | `STOP_HOLD_S` in `stop_detector.py` |
+| Longest `--auto` capture | `AUTO_STOP_MAX_DURATION_S` in `measure.py` |
 | Look of the plot (colours, labels, layout) | `plot_assets/capture_plot.html` |
 | Size and title of the live window | `WINDOW_SIZE`, `WINDOW_TITLE` in `live_window.py` |
 | A new simulated behaviour for the tests | a builder and an entry in `SCENARIOS` (`scenarios.py`) |
@@ -282,7 +287,7 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
   --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
   --noinclude-pytest-mode=nofollow ^
   --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
-  --file-version=3.0.0 --product-version=3.0.0 ^
+  --file-version=4.0.0 --product-version=4.0.0 ^
   measure.py
 ```
 
