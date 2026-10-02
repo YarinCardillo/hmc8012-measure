@@ -59,14 +59,7 @@ def show_capture_plot(
     else:
         ax.set_ylim(0.0, MIN_Y_SPAN_AMPS)
 
-    if analysis is not None and result.sample_count >= analysis.samples_used > 0:
-        stable_start_index = min(analysis.settling_sample_index, result.sample_count - 1)
-        stable_end_index = min(
-            analysis.settling_sample_index + analysis.samples_used,
-            result.sample_count,
-        )
-        stable_start_t = float(ts[stable_start_index])
-        stable_end_t = float(ts[stable_end_index - 1]) if stable_end_index > 0 else stable_start_t
+    if analysis is not None:
         ax.axhline(
             analysis.stable_value,
             color="tab:green",
@@ -74,8 +67,8 @@ def show_capture_plot(
             label=f"Stable = {analysis.stable_value:.4f} A",
         )
         ax.axvspan(
-            stable_start_t,
-            stable_end_t,
+            analysis.start_time,
+            analysis.end_time,
             color="tab:green",
             alpha=0.15,
             label="Stable region",
