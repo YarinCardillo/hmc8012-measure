@@ -1,4 +1,4 @@
-"""Continuous acquisition module for timestamped DCI sampling.
+"""Continuous acquisition module for timestamped sampling of one function (dci, dcv, aci, acv).
 
 Polls an instrument via a protocol interface, collects timestamped readings
 in a synchronous loop, and returns a frozen CaptureResult for Phase 1's analyzer.
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 # Consecutive failed readings (SCPI error or overflow) that end a capture.
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
+# FUNC? reply of each function a capture supports. The AC replies are not verified on the instrument.
+CAPTURE_FUNCTION_REPLIES = {"dci": "CURR", "dcv": "VOLT", "aci": "CURR:AC", "acv": "VOLT:AC"}
 
 
 class InstrumentProtocol(Protocol):
@@ -97,17 +99,23 @@ def _build_result(
 
 
 class ContinuousCapture:
-    """Collects timestamped DCI readings in a synchronous polling loop."""
+    """Collects timestamped readings of one function in a synchronous polling loop.
+
+    *function* is one of CAPTURE_FUNCTION_REPLIES; the instrument must already
+    be set to it, with its range locked.
+    """
 
     def __init__(
         self,
         instrument: InstrumentProtocol,
         *,
+        function: str = "dci",
         max_duration: float = 30.0,
         min_samples: int = 10,
         max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     ) -> None:
         self._instrument = instrument
+        self._function = function
         self._max_duration = max_duration
         self._min_samples = min_samples
         self._max_consecutive_failures = max_consecutive_failures
@@ -191,12 +199,13 @@ class ContinuousCapture:
         return deadline is not None and time.monotonic() >= deadline
 
     def _verify_instrument_state(self) -> None:
-        """Verify instrument is configured for DCI capture with valid ADC rate and range locked."""
+        """Verify instrument is set to the capture function with valid ADC rate and range locked."""
+        expected = CAPTURE_FUNCTION_REPLIES[self._function]
         func = self._instrument.get_function()
-        if func != "CURR":
+        if func != expected:
             raise CaptureConfigError(
-                f"Expected DCI function (CURR), got '{func}'. "
-                "Call set_function('dci') before capture."
+                f"Expected {self._function} function ({expected}), got '{func}'. "
+                f"Call set_function('{self._function}') before capture."
             )
         valid_rates = ("FAST", "SLOW", "MED")
         adc_rate = self._instrument.get_adc_rate()
@@ -205,8 +214,8 @@ class ContinuousCapture:
                 f"Expected ADC rate one of {valid_rates}, got '{adc_rate}'. "
                 "Call set_adc_rate('FAST'|'SLOW'|'MED') before capture."
             )
-        if self._instrument.get_range_auto("dci"):
+        if self._instrument.get_range_auto(self._function):
             raise CaptureConfigError(
-                "Auto-range is ON. Lock range with set_range('dci', '<value>') "
+                f"Auto-range is ON. Lock range with set_range('{self._function}', '<value>') "
                 "before capture."
             )
