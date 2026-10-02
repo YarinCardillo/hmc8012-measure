@@ -8,8 +8,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 import numpy as np
 
@@ -107,26 +106,18 @@ class ContinuousCapture:
         max_duration: float = 30.0,
         min_samples: int = 10,
         max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
-        sentinel_path: Path | None = None,
     ) -> None:
         self._instrument = instrument
         self._max_duration = max_duration
         self._min_samples = min_samples
         self._max_consecutive_failures = max_consecutive_failures
-        self._sentinel_path = sentinel_path if sentinel_path is not None else Path(__file__).parent / "capture.stop"
 
-    def run(
-        self,
-        deadline: float | None = None,
-        sample_callback: Callable[[float, float], None] | None = None,
-    ) -> CaptureResult:
+    def run(self, deadline: float | None = None) -> CaptureResult:
         """Execute the continuous capture loop.
 
         Args:
             deadline: Optional absolute wall-clock time (time.monotonic()) at which
                 to abort. When set, the loop exits when monotonic time >= deadline.
-            sample_callback: Optional callback(t_rel, value) invoked after each
-                successful sample for live plotting. Called from the capture thread.
 
         Returns:
             CaptureResult with collected timestamps, values, and metadata.
@@ -136,10 +127,8 @@ class ContinuousCapture:
             InsufficientSamplesError: If fewer than min_samples were collected.
         """
         self._verify_instrument_state()
-        self._cleanup_sentinel()
         start_time = time.perf_counter()
-        timestamps, values, aborted_reason = self._acquire(start_time, deadline, sample_callback)
-        self._cleanup_sentinel()
+        timestamps, values, aborted_reason = self._acquire(start_time, deadline)
         result = _build_result(timestamps, values, time.perf_counter() - start_time, aborted_reason)
         if result.sample_count < self._min_samples:
             raise InsufficientSamplesError(
@@ -151,9 +140,8 @@ class ContinuousCapture:
         self,
         start_time: float,
         deadline: float | None,
-        sample_callback: Callable[[float, float], None] | None,
     ) -> tuple[list[float], list[float], str | None]:
-        """Poll until duration, deadline, stop request or too many consecutive failures.
+        """Poll until the duration or deadline ends, or too many consecutive failures.
 
         A failed reading is kept as a NaN marker at its time, so the analysis
         knows a reading (often an overflowing peak) is missing there.
@@ -179,16 +167,12 @@ class ContinuousCapture:
                 continue
             timestamps.append(time.perf_counter() - start_time)
             values.append(value)
-            if sample_callback is not None:
-                sample_callback(timestamps[-1], value)
         return timestamps, values, None
 
     def _is_finished(self, start_time: float, deadline: float | None) -> bool:
         if time.perf_counter() - start_time >= self._max_duration:
             return True
-        if deadline is not None and time.monotonic() >= deadline:
-            return True
-        return self._should_stop()
+        return deadline is not None and time.monotonic() >= deadline
 
     def _verify_instrument_state(self) -> None:
         """Verify instrument is configured for DCI capture with valid ADC rate and range locked."""
@@ -210,14 +194,3 @@ class ContinuousCapture:
                 "Auto-range is ON. Lock range with set_range('dci', '<value>') "
                 "before capture."
             )
-
-    def _should_stop(self) -> bool:
-        """Return True if sentinel file exists, signaling stop request."""
-        return self._sentinel_path.exists()
-
-    def _cleanup_sentinel(self) -> None:
-        """Delete sentinel file if it exists."""
-        try:
-            self._sentinel_path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Could not delete sentinel file: %s", self._sentinel_path)
