@@ -17,6 +17,7 @@ HMC8012_user_manual.md
 
 # Runtime output
 result.txt
+capture_plot_*.html
 
 #additional files
 *.jpg

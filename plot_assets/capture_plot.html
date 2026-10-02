@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>{{UPLOT_CSS}}</style>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --text: #1b1b1b;
+  --muted: #595959;
+  --grid: #e4e4e4;
+  --curve: #1f4ea0;
+  --run: rgba(0, 0, 0, 0.06);
+  --window: rgba(22, 128, 60, 0.16);
+  --mean: #15803d;
+  --error: #b42318;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161616;
+    --text: #ececec;
+    --muted: #a3a3a3;
+    --grid: #2f2f2f;
+    --curve: #82aaff;
+    --run: rgba(255, 255, 255, 0.07);
+    --window: rgba(74, 222, 128, 0.18);
+    --mean: #4ade80;
+    --error: #ff8a80;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 12px 16px 8px; }
+h1 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+#summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 24px; margin-bottom: 8px; }
+.outcome { margin: 0; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.outcome.is-error { font-size: 15px; color: var(--error); }
+.outcome.is-running { font-size: 15px; font-weight: 500; color: var(--muted); }
+dl { display: flex; flex-wrap: wrap; gap: 2px 18px; margin: 0; font-size: 13px; }
+dl div { display: flex; gap: 6px; }
+dt { color: var(--muted); }
+dd { margin: 0; font-variant-numeric: tabular-nums; }
+.u-legend { font-size: 12px; color: var(--text); }
+.key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.swatch { display: inline-block; width: 12px; height: 10px; margin-right: 6px; vertical-align: -1px; }
+.swatch.is-run { background: var(--run); border-left: 1px dashed var(--muted); border-right: 1px dashed var(--muted); }
+.swatch.is-window { background: var(--window); border-left: 1px solid var(--mean); border-right: 1px solid var(--mean); }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">{{TITLE}}</h1>
+  <section id="summary">{{SUMMARY}}</section>
+  <div id="chart"></div>
+  <p class="key" id="key">
+    <span id="key-run"><span class="swatch is-run"></span>Regime</span>
+    <span id="key-window"><span class="swatch is-window"></span>Finestra di media</span>
+    <span id="key-zoom">Trascina per ingrandire, doppio clic per tornare indietro</span>
+  </p>
+</main>
+<script id="capture-data" type="application/json">{{DATA_JSON}}</script>
+<script>{{UPLOT_JS}}</script>
+<script>
+(function () {
+  "use strict";
+
+  const MIN_CHART_HEIGHT = 200;
+  // Room below the plot for the uPlot legend and the key.
+  const BELOW_CHART_PX = 72;
+
+  const data = JSON.parse(document.getElementById("capture-data").textContent);
+  const chartElement = document.getElementById("chart");
+  const style = getComputedStyle(document.documentElement);
+  const css = (name) => style.getPropertyValue(name).trim();
+  let plot = null;
+
+  function chartSize() {
+    const top = chartElement.getBoundingClientRect().top;
+    const height = Math.max(MIN_CHART_HEIGHT, window.innerHeight - top - BELOW_CHART_PX);
+    return { width: chartElement.clientWidth, height: height };
+  }
+
+  const formatSeconds = (u, value) => (value == null ? "-" : value.toFixed(2) + " s");
+  const formatMilliamps = (u, value) => (value == null ? "-" : value.toFixed(2) + " mA");
+
+  function drawSpan(u, span, fill, edge, dash) {
+    if (!span) return;
+    const box = u.bbox;
+    const start = u.valToPos(span[0], "x", true);
+    const end = u.valToPos(span[1], "x", true);
+    const ctx = u.ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(box.left, box.top, box.width, box.height);
+    ctx.clip();
+    ctx.fillStyle = fill;
+    ctx.fillRect(start, box.top, end - start, box.height);
+    ctx.strokeStyle = edge;
+    ctx.lineWidth = devicePixelRatio;
+    ctx.setLineDash(dash.map((length) => length * devicePixelRatio));
+    ctx.beginPath();
+    for (const x of [start, end]) {
+      ctx.moveTo(x, box.top);
+      ctx.lineTo(x, box.top + box.height);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function chartOptions(outcome, isLive) {
+    const axis = { stroke: css("--muted"), grid: { stroke: css("--grid"), width: 1 }, ticks: { stroke: css("--grid"), width: 1 } };
+    const series = [
+      { label: "Tempo", value: formatSeconds },
+      // Each reading holds until the next one, as in the analysis.
+      { label: "Corrente", stroke: css("--curve"), width: 1.5, paths: uPlot.paths.stepped({ align: 1 }), points: { show: false }, value: formatMilliamps },
+    ];
+    if (outcome.value_ma != null) {
+      series.push({ label: "Media", stroke: css("--mean"), width: 2, points: { show: false }, value: formatMilliamps });
+    }
+    return Object.assign(chartSize(), {
+      scales: { x: { time: false } },
+      axes: [Object.assign({ label: "Tempo (s)" }, axis), Object.assign({ label: "Corrente (mA)", size: 64 }, axis)],
+      series: series,
+      cursor: { drag: { x: !isLive, y: false } },
+      hooks: {
+        drawClear: [(u) => {
+          drawSpan(u, outcome.run_s, css("--run"), css("--muted"), [4, 3]);
+          drawSpan(u, outcome.window_s, css("--window"), css("--mean"), []);
+        }],
+      },
+    });
+  }
+
+  // During the live phase nothing is marked and zoom is off, so the key stays hidden.
+  function showKey(outcome) {
+    document.getElementById("key-run").hidden = !(outcome && outcome.run_s);
+    document.getElementById("key-window").hidden = !(outcome && outcome.window_s);
+    document.getElementById("key-zoom").hidden = !outcome;
+  }
+
+  function drawFinal(times, currents, outcome) {
+    const columns = [times, currents];
+    if (outcome.value_ma != null) {
+      const span = outcome.window_s;
+      columns.push(times.map((t) => (t >= span[0] && t <= span[1] ? outcome.value_ma : null)));
+    }
+    showKey(outcome);
+    plot = new uPlot(chartOptions(outcome, false), columns, chartElement);
+  }
+
+  function runLive() {
+    const times = [];
+    const currents = [];
+    const status = document.getElementById("live-status");
+    let lastReadingTime = 0;
+    let lastArrival = 0;
+    let hasTip = false;
+    let isFinished = false;
+
+    showKey(null);
+    plot = new uPlot(chartOptions({}, true), [times, currents], chartElement);
+
+    function dropTip() {
+      if (!hasTip) return;
+      times.pop();
+      currents.pop();
+      hasTip = false;
+    }
+
+    const source = new EventSource("events");
+    source.addEventListener("samples", (event) => {
+      const batch = JSON.parse(event.data);
+      dropTip();
+      times.push(...batch.time_s);
+      currents.push(...batch.current_ma);
+      lastReadingTime = times[times.length - 1];
+      lastArrival = performance.now();
+      // The last reading holds until the next one: a tip at "now" makes the trace advance every frame.
+      times.push(lastReadingTime);
+      currents.push(currents[currents.length - 1]);
+      hasTip = true;
+    });
+    source.addEventListener("final", (event) => {
+      isFinished = true;
+      source.close();
+      const outcome = JSON.parse(event.data);
+      dropTip();
+      document.title = outcome.title;
+      document.getElementById("title").textContent = outcome.title;
+      document.getElementById("summary").innerHTML = outcome.summary_html;
+      plot.destroy();
+      drawFinal(times, currents, outcome);
+    });
+    source.onerror = () => {
+      if (!isFinished) status.textContent = "In attesa di hmc.exe...";
+    };
+
+    function frame(now) {
+      if (isFinished) return;
+      if (hasTip) {
+        const tipTime = lastReadingTime + (now - lastArrival) / 1000;
+        times[times.length - 1] = tipTime;
+        status.textContent = (times.length - 1) + " letture, " + tipTime.toFixed(1) + " s";
+        plot.setData([times, currents]);
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("resize", () => {
+    if (plot) plot.setSize(chartSize());
+  });
+
+  if (data.is_live) {
+    runLive();
+  } else {
+    drawFinal(data.time_s, data.current_ma, data);
+  }
+})();
+</script>
+</body>
+</html>
