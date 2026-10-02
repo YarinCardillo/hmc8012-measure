@@ -1,461 +1,198 @@
 # HMC8012 Measurement Layer
 
-Tool Python per interfacciarsi con l'HMC8012 Digital Multimeter di Rohde & Schwarz.
+Strumento a riga di comando per il multimetro digitale Rohde & Schwarz HMC8012, chiamato da un programma host (una macro VBA). Ogni chiamata fa una cosa, scrive l'esito in `result.txt` accanto all'eseguibile e termina. Oltre alle letture istantanee, `capture` registra la corrente di alimentazione di un motore mentre è in funzione e ne riporta la corrente media di regime, gestendo il picco di spunto e il rumore.
 
-## Utilizzo
+English version: [README.md](README.md).
 
-### Misura
-
-Legge dallo strumento con la funzione e il fondo scala correnti. **Non** riconfigura nulla; usare il comando `range` prima.
+## Avvio rapido
 
 ```bat
-python measure.py <address> <function> [delay_seconds]
-hmc.exe <address> <function> [delay_seconds]
+hmc.exe 192.168.0.2 dci              rem lettura istantanea di corrente DC
+hmc.exe 192.168.0.2 range dci 2      rem corrente DC, fondo scala 2 A (resta finché non si cambia)
+hmc.exe 192.168.0.2 capture 10       rem avvia la cattura, poi muovi il motore
+type result.txt                      rem il valore in ampere, oppure ERR
+hmc.exe --version                    rem versione di questo eseguibile
 ```
 
-| Argomento | Descrizione |
-|-|-|
-| `address` | Indirizzo IP (es. `192.168.1.25`) o porta COM (es. `COM5`) |
-| `function` | Tipo di misura (vedi tabella sotto) |
-| `delay_seconds` | Attesa opzionale in secondi prima della misura (default: 0) |
+Per lo sviluppo (Python 3.11+):
 
-### Impostare il Fondo Scala
-
-Configura funzione e fondo scala sullo strumento. Le impostazioni vengono mantenute fino al prossimo comando `range` o `reset`. La connessione **non** resetta lo strumento.
-
-```bat
-python measure.py <address> range <function> <value>
-hmc.exe <address> range <function> <value>
+```bash
+python -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+python -m pytest -q
 ```
 
-| Argomento | Descrizione |
-|-|-|
-| `function` | dcv, acv, dci, aci, res, fres, cap |
-| `value` | Fondo scala in unita SI base (es. `2` per 2A, `0.4` per 400mV) oppure `AUTO` |
+## Comandi
 
-### Reset
+`<indirizzo>` è un indirizzo IP (`192.168.0.2`, LAN, porta 5025) o una porta COM (`COM3`, porta COM virtuale USB, solo Windows). `hmc.exe` e `python measure.py` accettano gli stessi argomenti.
 
-Ripristina lo strumento ai valori di fabbrica.
-
-```bat
-python measure.py <address> reset
-hmc.exe <address> reset
-```
-
-### Cattura continua DCI
-
-La cattura continua acquisisce campioni di corrente DC nel tempo, trova il regime e ne scrive la corrente media (il **valore stabile**) in `result.txt`. Impostare prima il fondo scala DCI (es. `range dci 0.2`). Vedi [Cattura continua: valore stabile](#cattura-continua-valore-stabile) per come si ricava il valore stabile.
-
-**Cattura a tempo (solo result.txt):**
-
-```bat
-python measure.py <address> capture [duration] [timeout]
-```
-
-Con un solo numero, timeout = duration + 10 secondi.
-
-**Cattura a tempo con grafico live:**
-
-```bat
-python measure.py <address> capture-plot [duration] [timeout]
-```
-
-Stessa regola per il timeout. Il grafico mostra la forma d’onda in tempo reale e a fine cattura la regione stabile e un box riepilogo (valore stabile, σ, N, Δt, rate).
-
-**Start/stop (senza durata fissa):**
-
-```bat
-python measure.py <address> capture-plot start [SLOW|MED|FAST]
-```
-
-Esegue fino alla creazione del file sentinel (massimo 1 ora). Il rate ADC è opzionale (default SLOW, usato anche da `capture` e da `capture-plot` a tempo: media il ripple dello stepper ed è l'unico rate con accuratezza specificata).
-
-```bat
-python measure.py <address> capture-plot stop
-```
-
-Crea il file sentinel; il processo che ha eseguito `start` termina la cattura, esegue l’analisi e scrive `result.txt` come al solito.
-
-### Funzioni Supportate
-
-| Nome | Misura | Comando SCPI | Fondi scala disponibili |
-| --- | --- | --- | --- |
-| `dcv` | Tensione DC | `CONF:VOLT:DC <range>` | 400mV, 4V, 40V, 400V, 1000V |
-| `acv` | Tensione AC | `CONF:VOLT:AC <range>` | 400mV, 4V, 40V, 400V, 750V |
-| `dci` | Corrente DC | `CONF:CURR:DC <range>` | 20mA, 200mA, 2A, 10A |
-| `aci` | Corrente AC | `CONF:CURR:AC <range>` | 20mA, 200mA, 2A, 10A |
-| `res` | Resistenza a 2 fili | `CONF:RES <range>` | 400, 4k, 40k, 400k, 4M, 40M, 250M |
-| `fres` | Resistenza a 4 fili | `CONF:FRES <range>` | 400, 4k, 40k, 400k, 4M |
-| `cap` | Capacità | `CONF:CAP <range>` | 5nF, 50nF, 500nF, 5uF, 50uF, 500uF |
-| `temp` | Temperatura (PT100) | `CONF:TEMP` | n/d |
-| `freq` | Frequenza | `CONF:FREQ` | n/d |
-| `cont` | Continuità | `CONF:CONT` | n/d |
-| `diod` | Test diodo | `CONF:DIOD` | n/d |
-
-### Valori di Fondo Scala (SCPI)
-
-I valori di fondo scala usano le unita SI base (volt, ampere, ohm, farad). Ad esempio, `0.4` = 400mV, `0.02` = 20mA.
-
-| Funzione | Valori di fondo scala | Unita |
+| Comando | Cosa fa | `result.txt` |
 |-|-|-|
-| `dcv` | 0.4, 4, 40, 400, 1000 | V |
-| `acv` | 0.4, 4, 40, 400, 750 | V |
-| `dci` | 0.02, 0.2, 2, 10 | A |
-| `aci` | 0.02, 0.2, 2, 10 | A |
-| `res` | 400, 4e3, 40e3, 400e3, 4e6, 40e6, 2.5e8 | Ohm |
-| `fres` | 400, 4e3, 40e3, 400e3, 4e6 | Ohm |
-| `cap` | 5e-9, 50e-9, 500e-9, 5e-6, 50e-6, 500e-6 | F |
+| `<indirizzo> <funzione> [ritardo]` | Una lettura con le impostazioni correnti, dopo un ritardo opzionale in secondi | valore o `ERR` |
+| `<indirizzo> range <funzione> <valore>` | Seleziona la funzione e il fondo scala; restano fino al prossimo `range` o `reset` | `OK` o `ERR` |
+| `<indirizzo> adc` | Legge l'ADC rate della funzione attiva | `SLOW`, `MED`, `FAST` o `ERR` |
+| `<indirizzo> adc <SLOW\|MED\|FAST>` | Imposta l'ADC rate della funzione attiva (l'ultima selezionata) | `OK` o `ERR` |
+| `<indirizzo> reset` | Ripristina le impostazioni di fabbrica (ADC rate SLOW, autorange attivo) | `OK` o `ERR` |
+| `<indirizzo> capture [durata] [timeout] [--save-samples]` | Registra la corrente DC per `durata` s (default 10) e riporta la corrente media di regime | valore o `ERR` |
+| `--version` | Stampa la versione sulla console | invariato |
 
-### Esempi
+**Dettagli di `capture`.** `timeout` vale di default `durata + 10` s. La cattura legge sempre con ADC rate SLOW: se lo strumento è a un altro rate, passa a SLOW e alla fine ripristina il rate precedente, anche se la cattura fallisce, quindi non cambia mai le impostazioni delle misure successive. Impostare prima il fondo scala della corrente DC con `range`; la cattura rifiuta l'autorange. `--save-samples` scrive anche le letture grezze in `capture_samples_<data UTC>.csv` accanto all'eseguibile (per diagnosi; spento di default).
 
-```bat
-rem 1. Reset dello strumento ai valori di fabbrica
-hmc.exe 192.168.1.25 reset
+### Funzioni e fondi scala
 
-rem 2. Configura corrente DC con fondo scala 2A
-hmc.exe 192.168.1.25 range dci 2
+| Nome | Misura | Comando SCPI | Valori di fondo scala (unità SI) |
+|-|-|-|-|
+| `dcv` | Tensione DC | `CONF:VOLT:DC` | 0.4, 4, 40, 400, 1000 V |
+| `acv` | Tensione AC | `CONF:VOLT:AC` | 0.4, 4, 40, 400, 750 V |
+| `dci` | Corrente DC | `CONF:CURR:DC` | 0.02, 0.2, 2, 10 A |
+| `aci` | Corrente AC | `CONF:CURR:AC` | 0.02, 0.2, 2, 10 A |
+| `res` | Resistenza a 2 fili | `CONF:RES` | 400, 4e3, 40e3, 400e3, 4e6, 40e6, 2.5e8 Ohm |
+| `fres` | Resistenza a 4 fili | `CONF:FRES` | 400, 4e3, 40e3, 400e3, 4e6 Ohm |
+| `cap` | Capacità | `CONF:CAP` | 5e-9, 50e-9, 500e-9, 5e-6, 50e-6, 500e-6 F |
+| `temp` | Temperatura (PT100) | `CONF:TEMP` | nessuno |
+| `freq` | Frequenza | `CONF:FREQ` | nessuno |
+| `cont` | Continuità | `CONF:CONT` | nessuno |
+| `diod` | Test diodo | `CONF:DIOD` | nessuno |
 
-rem 3. Misura (usa la funzione e il fondo scala configurati)
-hmc.exe 192.168.1.25 dci
+`range <funzione> AUTO` attiva l'autorange.
 
-rem 4. Misura con ritardo di 1.5s per il posizionamento
-hmc.exe 192.168.1.25 dci 1.5
+## Contratto con il programma host
 
-rem 5. Cambia a tensione DC, fondo scala 40V
-hmc.exe 192.168.1.25 range dcv 40
+**File.** `result.txt` viene scritto accanto a `hmc.exe`, che quindi deve stare in una cartella scrivibile. Il collegamento LAN non richiede altro; quello COM (USB) richiede il driver VCP dell'HMC8012.
 
-rem 6. Misura tensione DC
-hmc.exe 192.168.1.25 dcv
+**`result.txt`:**
 
-rem 7. Passa a fondo scala automatico per tensione AC
-hmc.exe COM5 range acv AUTO
+- Viene cancellato all'avvio di ogni comando (tranne `--version`) e scritto in un solo passaggio (file temporaneo, poi rinomina) alla fine: mentre un comando è in corso il file non esiste, e se il file esiste è completo.
+- La riga 1 è il valore (punto decimale), `OK`, l'ADC rate oppure `ERR`.
+- Dopo `ERR`, la riga 2 è `[APP] <comando> failed (<livello>).` e la riga 3 è `[EXC] <tipo>: <messaggio>`.
+- L'exit code è 0 in caso di successo e 1 in caso di errore.
 
-rem 8. Misura tensione AC
-hmc.exe COM5 acv
-```
-
-## Output
-
-**result.txt** (stessa directory dello script):
-
-- Misura riuscita: il valore numerico come numero semplice (es. `4.872341`)
-- Range/reset riuscito: `OK`
-- In caso di errore: tre righe:
-
-```
-ERR
-[APP] <comando> failed (<layer>).
-[EXC] <TipoEccezione>: <messaggio>
-```
-
-La riga `[APP]` identifica il comando fallito e il layer in cui si è verificato l'errore:
-
-| Layer | Significato |
+| Livello | Significato |
 |-|-|
 | `VISA/network` | Strumento non raggiunto: errore di connessione o trasporto |
-| `instrument SCPI` | Strumento raggiunto, ha riportato un errore SCPI tramite `SYST:ERR?` |
-| `instrument` | Strumento ha risposto correttamente, ma il valore indica overflow (`9.9e+37`) |
-| `input sanitization` | Argomento non valido, rifiutato prima di aprire la connessione |
-| `unexpected` | Eccezione non classificata, vedere `[EXC]` per i dettagli |
+| `instrument SCPI` / `instrument` | Strumento raggiunto, ma ha segnalato un errore, un overflow, oppure la cattura si è fermata per letture fallite |
+| `instrument config` | Cattura: funzione sbagliata o autorange ancora attivo |
+| `insufficient samples` | Cattura: troppo poche letture valide |
+| `analysis` | Cattura: letture registrate, ma nessun valore affidabile (vedi la tabella degli errori sotto) |
+| `input sanitization` | Argomento non valido |
+| `unexpected` | Qualsiasi altro errore; i dettagli sono in `[EXC]` |
 
-La riga `[EXC]` contiene il tipo di eccezione Python e il suo messaggio verbatim.
+**Tempi.** Ogni comando paga prima l'avvio di `hmc.exe` (l'eseguibile a file singolo si estrae all'avvio; di solito qualche secondo, da misurare sul PC di laboratorio). Una cattura dura poi `durata` secondi più l'analisi (molto sotto 0.1 s). Attendere la fine del processo, poi leggere il file:
 
-**stderr** usa gli stessi prefissi per tutto l'output diagnostico:
-- `[APP]`: messaggio scritto dal nostro codice (avanzamento, risultato, classificazione errore)
-- `[EXC]`: tipo di eccezione e messaggio, solo in caso di errore
+```vba
+Dim sh As Object, rc As Long
+Set sh = CreateObject("WScript.Shell")
+rc = sh.Run("""C:\hmc\hmc.exe"" 192.168.0.2 capture 10", 0, True) ' True = attende la fine
+' Poi legge C:\hmc\result.txt: la riga 1 è il valore oppure ERR.
+```
 
-## Cattura continua: valore stabile
+Funziona anche leggere dopo un tempo fisso, se l'attesa supera la durata del comando e il file assente viene trattato come "non ancora pronto". Leggere i numeri con `Val()`, che usa sempre il punto decimale; `CDbl` segue le impostazioni di Windows e in italiano si aspetta la virgola.
 
-Lo script scrive un solo numero in `result.txt`: la **corrente media di alimentazione del dispositivo durante il regime**, dalla fine del transitorio di avvio allo stop, in una cattura del tipo idle, avvio/spunto, regime, stop, idle. Ripple, PWM e variazioni di carico durante il regime fanno parte della media. Il calcolo è in `analyzer.py` (`analyze_waveform`):
+**Una cattura, un movimento.** Avviare la cattura almeno 1 s prima che il motore si muova (l'analisi ha bisogno prima della corrente di riposo) e lasciare che il motore si fermi prima della fine della cattura.
 
-1. **Validazione.** I timestamp devono essere strettamente crescenti. Letture NaN/inf e sentinelle di overflow (+/-9.9E37) sono campioni non validi; oltre il 20% di campioni non validi la cattura viene rifiutata.
-2. **Riferimento di idle.** La cattura deve iniziare con almeno 0.25 s di corrente di idle stabile (più metà della finestra di smoothing da 0.5 s): avviare la cattura prima che il dispositivo si muova.
-3. **Regime.** Il regime è dove la corrente smussata, pesata nel tempo, sta sopra l'idle di più di due tolleranze (i motori aggiungono soltanto corrente), per almeno `min_run_s` (0.5 s). Una cattura con due regimi separati viene rifiutata. I bordi del regime vengono rifiniti sulle letture grezze.
-4. **Finestra di media.** L'analyzer taglia l'inizio e la fine del regime (ciascuno fino a `max_settle_s`, default 1 s, a passi di 0.1 s, prima i tagli più piccoli) per escludere spunto, accelerazione e decelerazione. Una finestra è accettata quando non contiene letture non valide, i suoi blocchi da 1 s (due finestre di smoothing) concordano sulla media entro la tolleranza (max(2 mA, 2% della media), più il rumore delle letture) e la media è precisa: due errori standard, dalle letture e dalla dispersione delle medie dei blocchi, entro la tolleranza. Quindi il primo e l'ultimo `max_settle_s` del regime possono restare fuori quando differiscono dal resto: spunto, accelerazione, decelerazione, o un carico breve subito prima dello stop.
-5. **Risultato:** media pesata nel tempo sulla finestra, con ogni lettura mantenuta fino alla successiva, così poll irregolari e risposte `READ?` ripetute non la falsano.
+## Come si calcola il valore della cattura
 
-**Errori invece di numeri sbagliati.** `result.txt` riceve `ERR` con il motivo quando:
+`result.txt` contiene la **corrente media di alimentazione durante il regime**, dalla fine del transitorio di avvio allo stop, in una cattura del tipo riposo, avvio/spunto, regime, stop, riposo. Ripple, PWM e variazioni di carico durante il regime fanno parte della media. Il codice è in `analyzer.py` (`analyze_waveform`):
+
+1. **Validazione.** I timestamp devono crescere. Letture NaN/inf e sentinelle di overflow (+/-9.9E37) non sono valide; oltre il 20% di letture non valide la cattura viene rifiutata.
+2. **Riferimento di riposo.** La cattura deve iniziare con almeno 0.25 s di corrente di riposo stabile (più metà della finestra di smoothing da 0.5 s).
+3. **Regime.** Il regime è dove la corrente smussata, pesata nel tempo, sta sopra il riposo di più di due tolleranze (il motore aggiunge soltanto corrente), con una media sopra il riposo oltre il rumore, per almeno `min_run_s` (0.5 s). Due regimi separati nella stessa cattura vengono rifiutati. I bordi del regime vengono rifiniti sulle letture grezze.
+4. **Finestra di media.** L'inizio e la fine del regime vengono tagliati (ciascuno fino a `max_settle_s`, default 1 s, a passi di 0.1 s, prima i tagli più piccoli) per escludere spunto, accelerazione e decelerazione. Una finestra è accettata quando non contiene letture non valide, i suoi blocchi da 1 s concordano sulla media entro la tolleranza (max(2 mA, 2% della media), più il rumore delle letture) e la media è precisa: due errori standard, dalle letture e dalla dispersione delle medie dei blocchi, entro la tolleranza.
+5. **Risultato.** La media pesata nel tempo sulla finestra: ogni lettura pesa per l'intervallo fino alla lettura successiva, quindi poll irregolari e risposte `READ?` ripetute non la falsano.
+
+**Errori invece di numeri sbagliati.** Quando non esiste un valore affidabile, `result.txt` riceve `ERR`:
 
 | Errore | Significato | Cosa cambiare |
 |-|-|-|
-| `InvalidCaptureError` | Dati malformati, troppe letture non valide, nessun idle stabile all'inizio, o letture in overflow/NaN durante il regime | Avviare la cattura prima che il dispositivo si muova; alzare il fondo scala DCI se i picchi vanno in overflow; alzare `abs_tolerance_a` se la corrente di idle stessa fluttua di più di 2 mA |
+| `InvalidCaptureError` | Dati malformati, troppe letture non valide, nessun riposo stabile all'inizio, o letture in overflow/NaN durante il regime | Avviare la cattura prima che il motore si muova; alzare il fondo scala se i picchi vanno in overflow; alzare `abs_tolerance_a` se la corrente di riposo stessa fluttua di più di 2 mA |
 | `SignalNotSettledError` | Nessun regime, o regime non stabile: deriva, assestamento più lungo di `max_settle_s`, un secondo livello (mantenimento, standby dopo lo stop, altra velocità) | Catturare un solo regime stabile; aumentare `max_settle_s` per assestamenti lenti |
 | `AmbiguousRunError` | Più di un regime separato nella cattura | Un movimento per cattura |
-| `ImpreciseValueError` | Regime stabile ma media troppo incerta (rumore, burst lenti, poche letture) | Regime più lungo, ADC più lento o tolleranza più larga |
-
-**I campioni grezzi** vengono sempre salvati in `capture_samples_<data UTC>.csv` prima dell'analisi, anche quando la cattura si interrompe, così una cattura fallita si può rianalizzare nel simulatore. Una lettura fallita (overflow, risposta illeggibile) resta come `nan` al suo istante: scartarla nasconderebbe il picco a cui apparteneva. Cinque letture fallite di fila interrompono la cattura e danno `ERR`.
+| `ImpreciseValueError` | Regime stabile, ma media troppo incerta (rumore, variazioni lente del carico, poche letture) | Regime più lungo, o tolleranza più larga |
 
 **Limiti noti.**
 
-- Una corrente periodica (ripple di passo, PWM, burst) con frequenza multipla esatta o quasi esatta della frequenza di conversione ADC viene campionata in modo stroboscopico: le letture variano così lentamente, o per niente, che il regime sembra stabile al livello sbagliato. Il test a blocchi intercetta i battimenti lenti dentro il regime, ma un carico esattamente sincrono non è rilevabile dai campioni. SLOW integra su molti periodi del ripple veloce, quindi è il rate più sicuro (e l'unico con accuratezza specificata), ma un carico con periodo sottomultiplo dei suoi 200 ms di conversione può ancora dare aliasing se l'apertura dell'ADC è più corta del periodo di conversione (non indicato nel manuale; il simulatore assume il 50%).
+- Un carico periodico con periodo sottomultiplo dei 200 ms di conversione in SLOW può dare aliasing se l'apertura dell'ADC è più corta del periodo di conversione (non indicato nel manuale). Il ripple veloce (passi dello stepper, PWM del driver) si media dentro ogni conversione.
+- Carichi che variano su decimi di secondo danno poche letture distinte a 5 al secondo e finiscono spesso in `ImpreciseValueError`; un regime più lungo aiuta.
 - Un livello diverso più breve di circa `max_settle_s` all'inizio o alla fine del regime viene tagliato come se fosse un transitorio.
 
-Nel grafico della cattura la zona verde è la finestra di media, la linea verde tratteggiata il valore riportato e sigma la deviazione standard delle letture nella finestra.
+## Guida per sviluppatori
 
-## Simulatore
-
-`simulate.py` esegue il vero analyzer su catture simulate realistiche (modello della corrente del dispositivo più modello di acquisizione dell'HMC8012) e confronta il risultato con il valore vero noto: PASS (entro tolleranza), FAIL (valore sbagliato), RAISE (errore esplicito).
-
-```bash
-python simulate.py                                     # finestra interattiva: scenario, ADC rate, fondo scala, slider
-python simulate.py --scenario long_idle_after --adc SLOW
-python simulate.py --matrix --seeds 10                 # tabella PASS/FAIL/RAISE, tutti gli scenari x ADC rate
-python simulate.py --csv capture_samples_2026-10-01_15-00-00.csv   # rianalizza una cattura reale
-# opzioni comuni: --window S  --tolerance PCT  --min-run S  --max-settle S  --seed N  --save grafico.png
-```
-
-Gli scenari (`scenarios.py`) modellano un dispositivo con motori passo-passo: regime nominale, idle lungo dopo lo stop, corrente di regime sopra 0.4 A, carico PWM veloce, burst più lenti della finestra, corrente di mantenimento dopo lo stop, mantenimento prima e dopo il movimento, assestamento lento, aliasing del ripple di passo in FAST, dispositivo ancora acceso a fine cattura, e ripple vicino alla frequenza di conversione FAST (il limite noto sopra). I livelli di corrente sono indicativi; si regolano con gli slider.
-
-Modello di acquisizione (`simulation.py`): letture al secondo per ADC rate dal manuale HMC8012. Ogni conversione integra la corrente su un'apertura (assunta pari al 50% del periodo di conversione; non indicata nel manuale), viene quantizzata alla risoluzione del fondo scala e restituita da poll `READ?` che, in trigger AUTO, restituiscono l'ultima conversione (duplicati se si interroga più veloce dell'ADC). Le letture fuori scala diventano marcatori `nan` e cinque di fila terminano la cattura (esito RAISE), come fa il loop di cattura.
-
-Grafico: linea grigia = corrente vera, punti blu = campioni, linea arancione = livello smussato, banda grigia = regime, banda verde e linea tratteggiata = finestra di media e valore riportato, linea nera punteggiata = valore atteso. Il riquadro del titolo è verde (PASS), rosso (FAIL) o arancione (RAISE).
-
-## Come Funziona
-
-Lo script si connette al multimetro (senza resettarlo), attende il delay di posizionamento se specificato, invia `READ?` e scrive il risultato in `result.txt`. Funzione e fondo scala si configurano separatamente con il comando `range` e vengono mantenuti tra le chiamate.
-
-### Flusso di Sistema (Misura)
-
-```mermaid
-sequenceDiagram
-    participant HOST as Applicazione host
-    participant PY as measure.py
-    participant DRV as hmc8012.py
-    participant DMM as HMC8012
-
-    HOST->>PY: Avvia measure.py / hmc.exe <addr> <func> [delay]
-    Note over HOST: Continua immediatamente (non-blocking)
-    HOST->>HOST: Sposta il dispositivo sotto test
-
-    PY->>DRV: HMC8012(address)
-    DRV->>DMM: Connect (LAN o COM)
-    DRV->>DMM: *CLS / SYSTem:REMote
-
-    alt delay > 0
-        PY->>PY: time.sleep(delay)
-        Note over PY: Il dispositivo si sta posizionando
-    end
-
-    PY->>DRV: measure()
-    DRV->>DMM: READ? (trigger + lettura)
-    DMM-->>DRV: valore di misura
-    DRV->>DMM: SYST:ERR? (verifica errori)
-    DRV-->>PY: float value
-
-    PY->>DRV: close()
-    DRV->>DMM: SYST:ERR? (svuota la coda)
-    DRV->>DMM: SYSTem:LOCal (rilascia il pannello)
-
-    PY->>PY: Scrive result.txt
-    Note over HOST: Legge result.txt dopo un'attesa fissa
-    HOST->>HOST: Legge result.txt
-```
-
-### Flusso di Sistema (Range)
-
-```mermaid
-sequenceDiagram
-    participant HOST as Applicazione host
-    participant PY as measure.py
-    participant DRV as hmc8012.py
-    participant DMM as HMC8012
-
-    HOST->>PY: Avvia measure.py / hmc.exe <addr> range <func> <value>
-
-    PY->>DRV: HMC8012(address)
-    DRV->>DMM: Connect (LAN o COM)
-    DRV->>DMM: *CLS / SYSTem:REMote
-
-    PY->>DRV: set_range(function, value)
-    DRV->>DMM: CONF:<FUNC> (seleziona funzione)
-    DRV->>DMM: <FUNC>:RANGE:AUTO OFF
-    DRV->>DMM: <FUNC>:RANGE <value>
-    DRV->>DMM: *OPC?
-
-    PY->>DRV: close()
-    DRV->>DMM: SYSTem:LOCal (rilascia il pannello)
-
-    Note over DMM: Funzione + fondo scala persistono fino al prossimo range/reset
-    PY->>PY: Scrive OK in result.txt
-```
-
-### Flusso Interno (Misura)
-
-```mermaid
-flowchart TD
-    A[Parse CLI args] --> B[Connect to HMC8012]
-    B --> C[*CLS + SYSTem:REMote]
-    C --> D{delay > 0?}
-    D -- sì --> E[time.sleep delay]
-    D -- no --> F
-    E --> F[READ? trigger+read]
-    F --> G{overflow sentinel?}
-    G -- sì --> ERR[Scrive ERR in result.txt]
-    G -- no --> H[SYST:ERR? check]
-    H --> I{SCPI error?}
-    I -- sì --> ERR
-    I -- no --> J[SYSTem:LOCal + close]
-    J --> K[Scrive il valore in result.txt]
-
-    B -.->|connessione fallita| ERR
-```
-
-### Rilevamento Connessione
+### Architettura
 
 ```mermaid
 flowchart LR
-    A[argomento address] --> B{contiene '.'?}
-    B -- sì --> C["TCPIP::addr::5025::SOCKET"]
-    B -- no --> D{inizia con COM?}
-    D -- sì --> E["ASRL n ::INSTR"]
-    D -- no --> F[ValueError: indirizzo non valido]
+    CLI["measure.py<br/>CLI, result.txt"] --> DRV["hmc8012.py<br/>driver SCPI"]
+    CLI --> CAP["capture.py<br/>loop di lettura"]
+    CAP --> DRV
+    CLI --> ANA["analyzer.py<br/>media di regime"]
+    SIM["simulation.py + scenarios.py<br/>banco di prova fisico"] -.-> TESTS["tests/"]
+    TESTS -.-> ANA
 ```
 
-## Struttura dei File
+Una `capture` funziona così: `measure.py` apre lo strumento (`hmc8012.py`), seleziona la corrente DC, passa a SLOW se serve, `capture.py` interroga `READ?` fino alla fine della durata (le letture fallite restano NaN, cinque di fila fermano la cattura), il rate precedente viene ripristinato, `analyzer.py` calcola il valore e `measure.py` scrive `result.txt`.
 
-| File | Scopo |
-| --- | --- |
-| `measure.py` | Entry point CLI: gestione comandi, parsing argomenti, ritardo, capture/capture-plot, output su file |
-| `hmc8012.py` | Driver strumento HMC8012: connessione, comandi SCPI, misura, fondo scala |
-| `capture.py` | ContinuousCapture: loop di campionamento DCI, sentinel/deadline, sample_callback per grafico live |
-| `analyzer.py` | Analisi della corrente di regime: validazione, rilevamento idle e regime, finestra di media stabile, controllo di precisione |
-| `plotting.py` | Grafico post-cattura; il grafico live durante la cattura è in measure.py |
-| `simulation.py` | Modello fisico: fasi della corrente del dispositivo e acquisizione HMC8012 (apertura, quantizzazione, poll READ?) |
-| `scenarios.py` | Catalogo scenari per il simulatore e i test dell'analyzer |
-| `simulator_core.py` | Esegue e valuta l'analyzer su catture simulate; carica i CSV delle catture |
-| `simulator_view.py` | Grafici matplotlib e finestra interattiva del simulatore |
-| `simulate.py` | CLI del simulatore |
-
-## Riferimento al Codice
-
-### hmc8012.py
-
-#### Eccezioni
-
-| Classe | Descrizione |
-| --- | --- |
-| `ScpiError` | Sollevata quando lo strumento riporta un errore SCPI (risposta non zero a `SYST:ERR?`). |
-| `RangeOverflowError` | Sollevata quando lo strumento restituisce il valore sentinella di overflow (`9.9e+37`): l'ingresso ha superato il fondo scala selezionato. |
-
-#### `HMC8012`
-
-Classe driver per l'R&S HMC8012. Supporta i trasporti LAN (socket TCPIP) e COM (seriale/VCP) tramite PyVISA. Implementa il protocollo context manager (`with HMC8012(...) as dmm:`).
-
-##### Costanti
-
-| Nome | Valore | Descrizione |
-| --- | --- | --- |
-| `OVERFLOW_SENTINEL` | `9.90000000E+37` | Valore restituito dallo strumento in caso di overflow del fondo scala. |
-| `SCPI_PORT` | `5025` | Porta TCP usata per le connessioni socket LAN SCPI. |
-| `DEFAULT_TIMEOUT_MS` | `8000` | Timeout default per la comunicazione VISA, in millisecondi. |
-| `MAX_ERROR_QUEUE_DEPTH` | `50` | Numero massimo di iterazioni per svuotare la coda errori dello strumento. |
-
-##### Mappe
-
-`FUNCTION_SCPI_MAP: dict[str, str]`
-
-Associa ogni nome di funzione CLI al comando SCPI CONFigure. Usata da `set_range()` per selezionare la funzione di misura.
-
-| Chiave | Comando SCPI |
-|-|-|
-| `dcv` | `CONF:VOLT:DC` |
-| `acv` | `CONF:VOLT:AC` |
-| `dci` | `CONF:CURR:DC` |
-| `aci` | `CONF:CURR:AC` |
-| `res` | `CONF:RES` |
-| `fres` | `CONF:FRES` |
-| `cap` | `CONF:CAP` |
-| `temp` | `CONF:TEMP` |
-| `freq` | `CONF:FREQ` |
-| `cont` | `CONF:CONT` |
-| `diod` | `CONF:DIOD` |
-
-`RANGE_SCPI_MAP: dict[str, str]`
-
-Associa i nomi delle funzioni al prefisso SCPI SENSe usato da `set_range()` per il controllo del fondo scala.
-
-| Chiave | Prefisso SCPI |
-|-|-|
-| `dcv` | `VOLT:DC:RANGE` |
-| `acv` | `VOLT:AC:RANGE` |
-| `dci` | `CURR:DC:RANGE` |
-| `aci` | `CURR:AC:RANGE` |
-| `res` | `RES:RANGE` |
-| `fres` | `FRES:RANGE` |
-| `cap` | `CAP:RANGE` |
-
-##### Metodi pubblici
-
-| Firma | Descrizione |
-|-|-|
-| `__init__(address, timeout_ms=8000)` | Costruisce la stringa di risorsa VISA da `address` (IP o porta COM). Non apre la connessione. |
-| `connect() → None` | Apre la risorsa VISA, imposta i caratteri di terminazione, invia `*CLS`, `SYSTem:REMote`. **Non** resetta lo strumento. Chiamato automaticamente da `__enter__`. |
-| `close() → None` | Svuota la coda errori dello strumento, invia `SYSTem:LOCal` per ripristinare il controllo dal pannello frontale, chiude la risorsa VISA. Chiamato automaticamente da `__exit__`. |
-| `reset() → None` | Invia `*RST`, `*CLS`, poi `*OPC?` per confermare il completamento. Ripristina i valori di fabbrica. |
-| `identify() → str` | Restituisce la stringa di identificazione `*IDN?` dello strumento. |
-| `measure() → float` | Invia `READ?` per leggere con la configurazione corrente. Controlla overflow ed errori SCPI, restituisce il valore float. Solleva `RangeOverflowError` o `ScpiError`. |
-| `set_range(function, range_value="AUTO") → None` | Seleziona la funzione tramite `CONF:…`, poi imposta il fondo scala tramite comandi SENSe. Le impostazioni vengono mantenute fino al prossimo `set_range()` o `reset()`. Solleva `ValueError` per funzioni non supportate. |
-
-##### Metodi privati
-
-| Firma | Descrizione |
-|-|-|
-| `_check_errors() → None` | Interroga `SYST:ERR?` una volta; solleva `ScpiError` se il codice di risposta è diverso da zero. |
-| `_drain_error_queue() → None` | Legge `SYST:ERR?` in loop (fino a `MAX_ERROR_QUEUE_DEPTH`) finché la coda non è vuota. Chiamato durante `close()`. |
-| `_write(command) → None` | Invia una stringa di comando SCPI allo strumento. Solleva `ConnectionError` se non connesso. |
-| `_query(command) → str` | Invia una query SCPI e restituisce la stringa di risposta senza spazi. Solleva `ConnectionError` se non connesso. |
-| `_build_resource_string(address) → str` | Metodo statico. Rileva il tipo di connessione dalla stringa di indirizzo e restituisce la stringa di risorsa VISA corretta (`TCPIP::…::5025::SOCKET` o `ASRL<n>::INSTR`). Solleva `ValueError` per formati non riconosciuti. |
-
----
-
-### measure.py
-
-#### Costanti a livello di modulo
-
-| Nome | Valore | Descrizione |
+| Modulo | Responsabilità | Punti di ingresso pubblici |
 |-|-|-|
-| `SCRIPT_DIR` | `Path(sys.argv[0]).resolve().parent` | Directory assoluta dello script/eseguibile, usata per risolvere il percorso di `result.txt`. |
-| `DEFAULT_OUTPUT` | `SCRIPT_DIR / "result.txt"` | Percorso default del file di output. |
-| `VALID_FUNCTIONS` | chiavi ordinate di `HMC8012.VALID_FUNCTIONS` | Tutti i nomi di funzione di misura riconosciuti, usati nei messaggi di utilizzo/errore. |
-| `VALID_RANGE_FUNCTIONS` | chiavi ordinate di `HMC8012.RANGE_SCPI_MAP` | Nomi di funzione che supportano la selezione del fondo scala. |
+| `measure.py` | Dispatch CLI, `result.txt`, livelli di errore | `main`, `cmd_*`, `write_result`, `clear_result` |
+| `hmc8012.py` | SCPI via PyVISA (socket LAN o COM); ogni setter controlla `SYST:ERR?` | `HMC8012`, `ScpiError`, `RangeOverflowError` |
+| `capture.py` | Loop di lettura a tempo, conteggio dei fallimenti | `ContinuousCapture`, `CaptureResult` |
+| `analyzer.py` | Riposo, regime, finestra di media, precisione; solleva errori invece di tirare a indovinare | `analyze_waveform`, `AnalysisConfig`, `AnalysisResult`, classi di errore |
+| `simulation.py` | Banco di prova: corrente vera del motore e modello di campionamento HMC8012 | `Phase`, `InstrumentModel`, `simulate_capture` |
+| `scenarios.py` | Banco di prova: comportamenti del dispositivo con nome | `SCENARIOS`, `ScenarioParams` |
+| `version.py` | Unica fonte della versione di rilascio | `__version__` |
 
-#### Funzioni
+Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti ed errori sollevati.
 
-| Firma | Descrizione |
+### Dove modificare
+
+| Per cambiare | Modificare |
 |-|-|
-| `main() → None` | Entry point CLI. Analizza `sys.argv`, smista verso `cmd_measure`, `cmd_range` o `cmd_reset`. Esce con codice 1 per comandi sconosciuti o numero di argomenti errato. |
-| `cmd_measure(address, args) → None` | Gestisce il comando di misura. Estrae funzione e ritardo opzionale da `args`; apre `HMC8012` come context manager; chiama `dmm.measure()`; scrive il risultato float in `result.txt`. Scrive `ERR` ed esce con codice 1 in caso di eccezione. |
-| `cmd_range(address, args) → None` | Gestisce il sotto-comando `range`. Valida funzione e valore, chiama `dmm.set_range()`, scrive `OK` in `result.txt`. Scrive `ERR` ed esce con codice 1 in caso di errore. |
-| `cmd_reset(address) → None` | Gestisce il comando `reset`. Apre `HMC8012` e chiama `dmm.reset()`. Scrive `OK` o `ERR` in `result.txt`. |
-| `write_result(value, app_msg="", exc_detail="", output_path=DEFAULT_OUTPUT) → None` | Scrive `result.txt`, sovrascrivendo il contenuto esistente. La riga 1 è sempre `value`; se `app_msg` è fornito viene scritto alla riga 2; se `exc_detail` è fornito viene scritto alla riga 3. |
-| `_write_error(command, layer, exc) → None` | Scrive un errore stratificato sia su stderr che in `result.txt`. Formatta `[APP] <comando> failed (<layer>).` e `[EXC] <tipo>: <messaggio>`, li stampa su stderr, poi chiama `write_result("ERR", ...)`. |
-| `_usage_error(message) → None` | Stampa un messaggio di errore e il riepilogo di utilizzo completo su stderr, poi chiama `sys.exit(1)`. |
+| Taratura dell'analisi (finestra di smoothing, regime minimo, tagli, tolleranza) | default di `AnalysisConfig` in `analyzer.py` |
+| ADC rate delle catture | `CAPTURE_ADC_RATE` in `measure.py` |
+| Letture fallite che fermano una cattura | `DEFAULT_MAX_CONSECUTIVE_FAILURES` in `capture.py` |
+| Un nuovo comportamento simulato per i test | un builder e una voce in `SCENARIOS` (`scenarios.py`) |
+| Un nuovo comando | una funzione `cmd_*` e un ramo in `main()` (`measure.py`) |
+| La versione | `version.py` (vedi Rilasci) |
 
-## Compilazione dell'Eseguibile Standalone
+### Test
 
-Per distribuire lo strumento come `hmc.exe` autonomo (senza Python né NI-VISA sulla macchina di destinazione), va compilato con Nuitka su Windows.
+`python -m pytest -q` esegue tutti i test, compresi quelli che attendono il timeout di connessione su un indirizzo irraggiungibile. L'analyzer è testato contro la simulazione fisica (`simulation.py`, `scenarios.py`: riposo, spunto, ripple di passo, carico PWM, corrente di mantenimento, assestamento lento, aliasing, a ogni ADC rate) e casi limite costruiti a mano. La regola che i test fanno rispettare: una cattura dà il valore giusto o un errore esplicito, mai un valore sbagliato.
 
-**Da GitHub (senza macchina Windows).** Ogni push su `master` esegue `.github/workflows/build-windows.yml` su un runner Windows: installa Python 3.12, esegue i test, compila `hmc.exe`, verifica che si avvii e lo pubblica come artifact `hmc-exe-<commit>` nella pagina della run, nella scheda Actions del repository. Il workflow si può anche avviare a mano da lì (Run workflow).
+### Scelte di progetto
 
-**Su una macchina Windows.** Usare **Python 3.12** (il MinGW-w64 incluso in Nuitka non supporta la 3.13+):
+- **Media di tutto il regime.** Con ripple o carico variabile il numero utile è l'assorbimento medio durante il funzionamento, non il tratto più piatto.
+- **Meglio un errore di un numero sbagliato.** Ogni controllo (riposo all'inizio, un solo regime, blocchi stabili, precisione, nessuna lettura non valida nella finestra) rifiuta la cattura con un motivo invece di restituire un valore che potrebbe essere sbagliato.
+- **Sempre SLOW, senza effetti collaterali.** SLOW è l'unico rate con accuratezza specificata e media il ripple dello stepper dentro ogni conversione; la cattura ripristina il rate precedente, così le letture istantanee mantengono le loro impostazioni.
+- **Pesato nel tempo, ogni lettura valida fino alla successiva.** L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi interrogando più veloce dell'ADC i valori si ripetono; il peso nel tempo rende il risultato indipendente dalla frequenza di interrogazione.
+- **Le letture fallite restano come NaN.** Scartarle nasconderebbe i picchi in overflow e falserebbe la media verso il basso.
+
+### Note sullo strumento
+
+Dai manuali utente e SCPI dell'HMC8012: la corrente DC dà 5 / 10 / 200 letture al secondo in SLOW / MED / FAST con 5¾ / 4¾ / 4¾ cifre, l'accuratezza è specificata solo in SLOW, `*RST` imposta SLOW, e `ADCRate` "selects the ADC rate for the activated measurement function". Non indicati nei manuali, da verificare sullo strumento: se `CONF:CURR:DC` senza fondo scala riporta il fondo scala in automatico (la cattura si fermerebbe con `instrument config`) e la durata dell'apertura dell'ADC.
+
+## Rilasci e compilazione
+
+La versione sta in `version.py` e da nessun'altra parte: `hmc.exe --version` la stampa e la build la scrive nelle proprietà del file eseguibile. Ogni modifica rilasciata la incrementa (versionamento semantico: major per un contratto host cambiato, minor per nuovi comandi, patch per correzioni).
+
+**Da GitHub.** Ogni push su `master` esegue `.github/workflows/build-windows.yml` su un runner Windows: Python 3.12, i test, la compilazione con Nuitka, uno smoke test (la versione da riga di comando e nelle proprietà del file deve coincidere con `version.py`, e un comando non valido deve dare `ERR`) e il caricamento di `hmc.exe` come artifact `hmc-exe-v<versione>-<commit>` nella pagina della run, nella scheda Actions. Si può anche avviare a mano da lì (Run workflow).
+
+**Su Windows**, con Python 3.12 (il MinGW-w64 incluso in Nuitka non supporta la 3.13+):
 
 ```bat
 pip install -r requirements.txt nuitka
 python -m pytest -q
-python -m nuitka --onefile --enable-plugin=tk-inter --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial measure.py
+python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" --file-version=2.0.0 --product-version=2.0.0 measure.py
 ```
 
-`hmc.exe` accetta gli stessi argomenti di `python measure.py` e scrive `result.txt` e i CSV delle catture accanto a sé, quindi va messo in una cartella scrivibile. Il collegamento COM (USB) richiede il driver VCP dell'HMC8012; la LAN non richiede nulla.
+Usare in `--file-version` e `--product-version` la versione di `version.py`.
 
 ## Dipendenze
 
 - Python 3.11 o successivo (3.12 per compilare l'eseguibile)
-- `pyvisa` - comunicazione VISA con gli strumenti
-- `pyvisa-py` - backend VISA in puro Python (non richiede NI-VISA per connessioni LAN)
-- `pyserial` - richiesto su Windows per le connessioni via porta COM
-- `numpy` - analisi delle catture
-- `matplotlib` - grafici delle catture e simulatore
-- `pytest` - test
+- `pyvisa`, `pyvisa-py`: comunicazione con lo strumento senza NI-VISA
+- `pyserial`: connessioni via porta COM
+- `numpy`: analisi delle catture
+- `pytest`: test
 
 ```bash
 pip install -r requirements.txt
