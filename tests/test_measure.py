@@ -66,7 +66,7 @@ def test_cli_capture_rejects_timeout_less_than_duration() -> None:
     """Capture command must reject timeout < duration (INTG-04)."""
     script_dir = Path(__file__).resolve().parent.parent
     result = subprocess.run(
-        [sys.executable, "-m", "measure", "192.168.0.1", "capture", "10", "5"],
+        [sys.executable, "-m", "measure", "192.168.0.1", "dci", "--time", "10", "--timeout", "5"],
         capture_output=True,
         text=True,
         cwd=script_dir,
@@ -81,7 +81,7 @@ def test_cli_capture_invalid_address_writes_err(tmp_path: Path) -> None:
     result_file = script_dir / "result.txt"
     # Use non-routable address so connect fails quickly
     proc = subprocess.run(
-        [sys.executable, "-m", "measure", "192.0.2.1", "capture", "1", "5"],
+        [sys.executable, "-m", "measure", "192.0.2.1", "dci", "--time", "1", "--timeout", "5"],
         capture_output=True,
         text=True,
         cwd=script_dir,
@@ -147,6 +147,9 @@ class _FakeDmm:
 
     def get_range_auto(self, function: str) -> bool:
         return False
+
+    def measure(self) -> float:
+        return 0.03
 
     def measure_fast(self) -> float:
         self._count += 1
@@ -214,17 +217,47 @@ def test_saved_samples_survive_a_failed_capture(tmp_path: Path, monkeypatch, dmm
 
 
 @pytest.mark.parametrize("args, expected", [
-    ([], (30.0, 40.0, False, False, False, True)),
-    (["5"], (5.0, 15.0, False, False, False, False)),
-    (["5", "8"], (5.0, 8.0, False, False, False, False)),
-    (["5", "--save-samples"], (5.0, 15.0, True, False, False, False)),
-    (["--save-samples", "5", "8"], (5.0, 8.0, True, False, False, False)),
-    (["5", "--save-plot"], (5.0, 15.0, False, True, False, False)),
-    (["--live", "5"], (5.0, 15.0, False, False, True, False)),
-    (["--live", "--save-plot", "--save-samples"], (30.0, 40.0, True, True, True, True)),
+    ([], (0.0, None)),
+    (["--delay", "1.5"], (1.5, None)),
+    (['""'], (0.0, None)),
+    (["--time", "5"], (0.0, (5.0, 15.0, False, False, False, False))),
+    (["--time", "5", "--timeout", "8"], (0.0, (5.0, 8.0, False, False, False, False))),
+    (["--auto"], (0.0, (30.0, 40.0, False, False, False, True))),
+    (["--save-samples", "--time", "5"], (0.0, (5.0, 15.0, True, False, False, False))),
+    (["--time", "5", "--save-plot"], (0.0, (5.0, 15.0, False, True, False, False))),
+    (["--live", "--auto", "--save-plot", "--save-samples"], (0.0, (30.0, 40.0, True, True, True, True))),
 ])
-def test_capture_arguments_accept_optional_flags_in_any_position(args, expected) -> None:
-    assert measure_module._parse_capture_args(args) == expected
+def test_measure_arguments_select_a_reading_or_a_capture(args, expected) -> None:
+    assert measure_module._parse_measure_args("dci", args) == expected
+
+
+@pytest.mark.parametrize("function, args", [
+    ("dci", ["--time", "5", "--auto"]),
+    ("dci", ["--delay", "1", "--time", "5"]),
+    ("dci", ["--save-plot"]),
+    ("dci", ["--time"]),
+    ("dci", ["--time", "0"]),
+    ("dci", ["--time", "5", "--timeout", "3"]),
+    ("dci", ["--delay", "-1"]),
+    ("dci", ["5"]),
+    ("dci", ["--bogus"]),
+    ("res", ["--auto"]),
+])
+def test_invalid_measure_arguments_are_a_usage_error(monkeypatch, function, args) -> None:
+    written = []
+    monkeypatch.setattr(measure_module, "write_result", lambda *lines: written.append(lines))
+    with pytest.raises(SystemExit):
+        measure_module._parse_measure_args(function, args)
+    assert written[0][0] == "ERR"
+
+
+def test_a_single_reading_waits_for_the_delay_first(monkeypatch) -> None:
+    events = []
+    _use_fake(monkeypatch, _FakeDmm())
+    monkeypatch.setattr(measure_module.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+    monkeypatch.setattr(measure_module, "write_result", lambda *lines: events.append(("result", lines[0])))
+    measure_module.cmd_measure("192.0.2.1", ["dci", "--delay", "1.5"])
+    assert events == [("sleep", 1.5), ("result", "0.03")]
 
 
 class _StopAfter:
@@ -247,19 +280,23 @@ def test_only_an_auto_stop_capture_ends_when_the_device_is_back_at_idle(monkeypa
     assert (len(result.values) == 12) == stops_early
 
 
-@pytest.mark.parametrize("args, stop_on_idle", [([], True), (["10"], False)])
-def test_capture_without_a_duration_stops_on_idle(monkeypatch, args, stop_on_idle) -> None:
+@pytest.mark.parametrize("args, session", [
+    (["dci", "--auto"], ("dci", 30.0, True)),
+    (["dci", "--time", "10"], ("dci", 10.0, False)),
+    (["dcv", "--auto"], ("dcv", 30.0, True)),
+])
+def test_time_and_auto_capture_the_function_given(monkeypatch, args, session) -> None:
     sessions = []
 
     def fake_session(address, duration, timeout, **kwargs):
-        sessions.append(kwargs["stop_on_idle"])
+        sessions.append((kwargs["function"], duration, kwargs["stop_on_idle"]))
         raise AnalysisError("stop here")
 
     monkeypatch.setattr(measure_module, "_run_capture_session", fake_session)
     monkeypatch.setattr(measure_module, "write_result", lambda *lines: None)
     with pytest.raises(SystemExit):
-        measure_module.cmd_capture("192.0.2.1", args)
-    assert sessions == [stop_on_idle]
+        measure_module.cmd_measure("192.0.2.1", args)
+    assert sessions == [session]
 
 
 def _analysis() -> AnalysisResult:
