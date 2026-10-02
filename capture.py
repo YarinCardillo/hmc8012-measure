@@ -5,6 +5,7 @@ in a synchronous loop, and returns a frozen CaptureResult for Phase 1's analyzer
 """
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,9 @@ import numpy as np
 from hmc8012 import RangeOverflowError, ScpiError
 
 logger = logging.getLogger(__name__)
+
+# Consecutive failed readings (SCPI error or overflow) that end a capture.
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 
 
 class InstrumentProtocol(Protocol):
@@ -32,10 +36,11 @@ class CaptureResult:
 
     Attributes:
         timestamps: Monotonic perf_counter values for each sample (relative to start).
-        values: Measurement values (amps) for each sample.
-        sample_count: Number of successfully captured samples.
+        values: Measurement values (amps) for each sample; NaN marks a failed reading.
+        sample_count: Number of valid (non-NaN) readings.
         actual_duration: Wall-clock duration of capture (seconds).
         sample_rate: Effective samples per second (sample_count / actual_duration).
+        aborted_reason: Why the capture stopped before its duration, or None.
     """
 
     timestamps: np.ndarray
@@ -43,6 +48,7 @@ class CaptureResult:
     sample_count: int
     actual_duration: float
     sample_rate: float
+    aborted_reason: str | None = None
 
     def __post_init__(self) -> None:
         ts = object.__getattribute__(self, "timestamps")
@@ -56,7 +62,39 @@ class CaptureConfigError(Exception):
 
 
 class InsufficientSamplesError(Exception):
-    """Raised when sample count is below the minimum threshold."""
+    """Raised when sample count is below the minimum threshold.
+
+    Attributes:
+        result: The partial capture, so its readings can still be saved.
+    """
+
+    def __init__(self, message: str, result: "CaptureResult") -> None:
+        super().__init__(message)
+        self.result = result
+
+
+class CaptureAbortedError(Exception):
+    """Raised when a capture stopped early on consecutive failed readings."""
+
+
+def _build_result(
+    timestamps: list[float],
+    values: list[float],
+    actual_duration: float,
+    aborted_reason: str | None,
+) -> CaptureResult:
+    """Freeze the readings; *sample_count* counts valid readings only."""
+    ts_array = np.array(timestamps, dtype=float)
+    val_array = np.array(values, dtype=float)
+    sample_count = int(np.count_nonzero(np.isfinite(val_array)))
+    return CaptureResult(
+        timestamps=ts_array,
+        values=val_array,
+        sample_count=sample_count,
+        actual_duration=actual_duration,
+        sample_rate=sample_count / actual_duration if actual_duration > 0 else 0.0,
+        aborted_reason=aborted_reason,
+    )
 
 
 class ContinuousCapture:
@@ -68,7 +106,7 @@ class ContinuousCapture:
         *,
         max_duration: float = 30.0,
         min_samples: int = 10,
-        max_consecutive_failures: int = 5,
+        max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
         sentinel_path: Path | None = None,
     ) -> None:
         self._instrument = instrument
@@ -99,60 +137,58 @@ class ContinuousCapture:
         """
         self._verify_instrument_state()
         self._cleanup_sentinel()
+        start_time = time.perf_counter()
+        timestamps, values, aborted_reason = self._acquire(start_time, deadline, sample_callback)
+        self._cleanup_sentinel()
+        result = _build_result(timestamps, values, time.perf_counter() - start_time, aborted_reason)
+        if result.sample_count < self._min_samples:
+            raise InsufficientSamplesError(
+                f"Captured {result.sample_count} samples, minimum is {self._min_samples}", result
+            )
+        return result
 
+    def _acquire(
+        self,
+        start_time: float,
+        deadline: float | None,
+        sample_callback: Callable[[float, float], None] | None,
+    ) -> tuple[list[float], list[float], str | None]:
+        """Poll until duration, deadline, stop request or too many consecutive failures.
+
+        A failed reading is kept as a NaN marker at its time, so the analysis
+        knows a reading (often an overflowing peak) is missing there.
+        """
         timestamps: list[float] = []
         values: list[float] = []
         consecutive_failures = 0
-        start_time = time.perf_counter()
-
-        while True:
-            elapsed = time.perf_counter() - start_time
-            if elapsed >= self._max_duration:
-                break
-            if deadline is not None and time.monotonic() >= deadline:
-                break
-            if self._should_stop():
-                break
-
+        while not self._is_finished(start_time, deadline):
             try:
                 value = self._instrument.measure_fast()
-                t = time.perf_counter() - start_time
-                timestamps.append(t)
-                values.append(value)
-                if sample_callback is not None:
-                    sample_callback(t, value)
                 consecutive_failures = 0
             except (ScpiError, RangeOverflowError) as exc:
+                timestamps.append(time.perf_counter() - start_time)
+                values.append(math.nan)
                 consecutive_failures += 1
-                logger.warning("Sample %d failed: %s", len(values), exc)
+                logger.warning("Sample %d failed: %s", len(values) - 1, exc)
                 if consecutive_failures >= self._max_consecutive_failures:
-                    logger.error(
-                        "Aborting: %d consecutive failures", consecutive_failures
+                    logger.error("Aborting: %d consecutive failures", consecutive_failures)
+                    return timestamps, values, (
+                        f"Stopped after {consecutive_failures} consecutive failed readings "
+                        f"at {timestamps[-1]:.2f} s: {exc}"
                     )
-                    break
+                continue
+            timestamps.append(time.perf_counter() - start_time)
+            values.append(value)
+            if sample_callback is not None:
+                sample_callback(timestamps[-1], value)
+        return timestamps, values, None
 
-        self._cleanup_sentinel()
-        actual_duration = time.perf_counter() - start_time
-        sample_count = len(values)
-
-        if sample_count < self._min_samples:
-            raise InsufficientSamplesError(
-                f"Captured {sample_count} samples, minimum is {self._min_samples}"
-            )
-
-        sample_rate = sample_count / actual_duration if actual_duration > 0 else 0.0
-        ts_array = np.array(timestamps, dtype=float)
-        val_array = np.array(values, dtype=float)
-        ts_array.flags.writeable = False
-        val_array.flags.writeable = False
-
-        return CaptureResult(
-            timestamps=ts_array,
-            values=val_array,
-            sample_count=sample_count,
-            actual_duration=actual_duration,
-            sample_rate=sample_rate,
-        )
+    def _is_finished(self, start_time: float, deadline: float | None) -> bool:
+        if time.perf_counter() - start_time >= self._max_duration:
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            return True
+        return self._should_stop()
 
     def _verify_instrument_state(self) -> None:
         """Verify instrument is configured for DCI capture with valid ADC rate and range locked."""

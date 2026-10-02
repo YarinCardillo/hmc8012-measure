@@ -95,3 +95,30 @@ def test_measure_fast_raises_on_overflow():
     hmc._instrument._query_responses = ["9.90000000E+37"]
     with pytest.raises(RangeOverflowError, match="Range overflow"):
         hmc.measure_fast()
+
+
+@pytest.mark.parametrize("call", [
+    lambda hmc: hmc.set_range("dci", "abc"),
+    lambda hmc: hmc.set_function("dci"),
+    lambda hmc: hmc.set_adc_rate("SLOW"),
+    lambda hmc: hmc.reset(),
+])
+def test_setters_raise_when_instrument_reports_error(call):
+    hmc = _hmc8012_with_mock()
+    hmc._instrument._query_responses = ["1", "-222,\"Data out of range\""]
+    with pytest.raises(ScpiError, match="-222"):
+        call(hmc)
+
+
+def test_measure_raises_on_negative_overflow():
+    hmc = _hmc8012_with_mock()
+    hmc._instrument._query_responses = ["-9.90000000E+37"]
+    with pytest.raises(RangeOverflowError):
+        hmc.measure()
+
+
+def test_measure_fast_raises_on_negative_overflow():
+    hmc = _hmc8012_with_mock()
+    hmc._instrument._query_responses = ["-9.90000000E+37"]
+    with pytest.raises(RangeOverflowError):
+        hmc.measure_fast()

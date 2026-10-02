@@ -5,7 +5,7 @@ Commands:
     python measure.py <address> range <function> <value>       Configure function + range
     python measure.py <address> reset                          Reset instrument
     python measure.py <address> capture [duration] [timeout]   Continuous DCI capture + analysis
-    python measure.py <address> capture-plot start [FAST|SLOW|MED]  Capture until stop (or 1h)
+    python measure.py <address> capture-plot start [SLOW|MED|FAST]  Capture until stop (or 1h)
     python measure.py <address> capture-plot stop                  Stop running capture
     python measure.py <address> capture-plot [duration] [timeout]   Timed capture + plot
 
@@ -39,6 +39,7 @@ import pyvisa
 
 from analyzer import AnalysisError, AnalysisResult, analyze_waveform
 from capture import (
+    CaptureAbortedError,
     CaptureConfigError,
     CaptureResult,
     ContinuousCapture,
@@ -46,9 +47,7 @@ from capture import (
 )
 from hmc8012 import HMC8012, RangeOverflowError, ScpiError
 
-# sys.argv[0] always points to the actual script/executable being run.
-# This is more reliable than __file__ when compiled with Nuitka (onefile mode),
-# where __file__ resolves to a temp extraction directory instead of the exe location.
+# sys.argv[0], not __file__: Nuitka onefile resolves __file__ to a temp extraction directory.
 SCRIPT_DIR = Path(sys.argv[0]).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "result.txt"
 # Extra seconds added to duration when timeout is not given (analysis + margin)
@@ -62,10 +61,12 @@ CAPTURE_PLOT_Y_SPAN_AMPS = 1.0
 # Prefix for raw capture samples file; name will be {prefix}_YYYY-MM-DD_HH-MM-SS.csv
 CAPTURE_SAMPLES_FILE_PREFIX = "capture_samples"
 VALID_ADC_RATES = ("FAST", "SLOW", "MED")
+# SLOW integrates over 200 ms: it averages stepper ripple and is the only rate with specified accuracy.
+DEFAULT_ADC_RATE = "SLOW"
+# Nuitka defines __compiled__ in compiled modules: the executable then relaunches itself.
+IS_COMPILED = "__compiled__" in globals()
 VALID_FUNCTIONS = sorted(HMC8012.VALID_FUNCTIONS)
 VALID_RANGE_FUNCTIONS = sorted(HMC8012.RANGE_SCPI_MAP.keys())
-
-# -- Command handlers -------------------------------------------------------
 
 def cmd_measure(address: str, args: list[str]) -> None:
     """Handle: measure.py <address> <function> [delay]"""
@@ -187,16 +188,14 @@ def cmd_capture(address: str, args: list[str]) -> None:
     try:
         result, analysis = _run_capture_session(address, duration, timeout)
         write_result(str(analysis.stable_value))
-        samples_path = write_capture_samples(result)
         print(
             f"[APP] Capture: {result.sample_count} samples, stable value: {analysis.stable_value}",
             file=sys.stderr,
         )
-        print(f"[APP] Raw samples written to: {samples_path}", file=sys.stderr)
     except pyvisa.errors.VisaIOError as exc:
         _write_error("Capture", "VISA/network", exc)
         sys.exit(1)
-    except (ScpiError, RangeOverflowError) as exc:
+    except (ScpiError, RangeOverflowError, CaptureAbortedError) as exc:
         _write_error("Capture", "instrument", exc)
         sys.exit(1)
     except CaptureConfigError as exc:
@@ -220,17 +219,17 @@ def cmd_capture_plot(address: str, args: list[str]) -> None:
     """Capture with live-updating plot; after capture, annotate stable value and region.
 
     Modes:
-      capture-plot start [FAST|SLOW|MED]  Run until capture-plot stop (or 1h limit).
+      capture-plot start [SLOW|MED|FAST]  Run until capture-plot stop (or 1h limit), default SLOW.
       capture-plot stop                    Create sentinel file to stop a running start.
       capture-plot [duration] [timeout]   Run for duration seconds (timeout optional).
     """
-    # --- stop: only create sentinel file, no instrument connection ---
+    # stop: only create the sentinel file, no instrument connection.
     if args and args[0].lower() == "stop":
         CAPTURE_SENTINEL_PATH.touch()
         print("[APP] Stop signal sent. Capture process will exit.", file=sys.stderr)
         return
 
-    # --- start: long-running capture until stop or max duration ---
+    # start: long-running capture until stop or the maximum duration.
     if args and args[0].lower() == "start":
         # Strip --ui/--UI so it is not interpreted as ADC rate
         args_start = [a for a in args if a.upper() != "--UI"]
@@ -238,7 +237,7 @@ def cmd_capture_plot(address: str, args: list[str]) -> None:
         adc_rate = (
             args_start[1].upper()
             if len(args_start) > 1 and args_start[1].upper() in VALID_ADC_RATES
-            else "FAST"
+            else DEFAULT_ADC_RATE
         )
         if len(args_start) > 1 and args_start[1].upper() not in VALID_ADC_RATES:
             _usage_error(
@@ -257,17 +256,25 @@ def cmd_capture_plot(address: str, args: list[str]) -> None:
         )
         return
 
-    # --- duration [timeout]: classic timed capture ---
+    # duration [timeout]: timed capture.
     duration, timeout = _parse_capture_args(args)
-    _run_capture_plot_live(address, duration, timeout, sentinel_path=None, adc_rate="FAST")
+    _run_capture_plot_live(address, duration, timeout, sentinel_path=None, adc_rate=DEFAULT_ADC_RATE)
+
+
+def _capture_start_command(address: str, adc_rate: str, is_compiled: bool) -> list[str]:
+    """Command line that runs ``capture-plot start`` in a child process.
+
+    A compiled executable has no measure.py next to it, so it relaunches itself.
+    """
+    arguments = [address, "capture-plot", "start", adc_rate]
+    if is_compiled:
+        return [sys.argv[0], *arguments]
+    return [sys.executable, str(SCRIPT_DIR / "measure.py"), *arguments]
 
 
 def _run_capture_plot_ui(address: str, adc_rate: str) -> None:
     """Show a small GUI with Start/Stop; Start runs capture+plot in a subprocess, Stop touches sentinel."""
-    script_path = SCRIPT_DIR / "measure.py"
-    cmd = [sys.executable, str(script_path), address, "capture-plot", "start"]
-    if adc_rate != "FAST":
-        cmd.append(adc_rate)
+    cmd = _capture_start_command(address, adc_rate, IS_COMPILED)
 
     proc: subprocess.Popen | None = None
 
@@ -310,7 +317,7 @@ def _run_capture_plot_live(
     timeout: float,
     *,
     sentinel_path: Path | None = None,
-    adc_rate: str = "FAST",
+    adc_rate: str = DEFAULT_ADC_RATE,
 ) -> None:
     """Run live capture+plot with given duration, timeout, optional sentinel path and ADC rate."""
     # Shared state: live samples for plot, final result when capture thread finishes
@@ -329,17 +336,15 @@ def _run_capture_plot_live(
                 adc_rate=adc_rate,
             )
             write_result(str(analysis.stable_value))
-            samples_path = write_capture_samples(result)
             print(
                 f"[APP] Capture+Plot: {result.sample_count} samples, stable value: {analysis.stable_value}",
                 file=sys.stderr,
             )
-            print(f"[APP] Raw samples written to: {samples_path}", file=sys.stderr)
             result_holder.append((result, analysis))
         except pyvisa.errors.VisaIOError as exc:
             _write_error("Capture", "VISA/network", exc)
             result_holder.append(None)
-        except (ScpiError, RangeOverflowError) as exc:
+        except (ScpiError, RangeOverflowError, CaptureAbortedError) as exc:
             _write_error("Capture", "instrument", exc)
             result_holder.append(None)
         except CaptureConfigError as exc:
@@ -398,15 +403,7 @@ def _run_capture_plot_live(
             line.set_data(result.timestamps, result.values)
             ax.relim()
             ax.autoscale_view(scalex=True, scaley=False)
-            if analysis and result.sample_count >= analysis.samples_used > 0:
-                # Green zone: from settling start to stable region end (indices in raw result; same as filtered when no overflows)
-                stable_start_idx = min(analysis.settling_sample_index, result.sample_count - 1)
-                stable_end_idx = min(
-                    analysis.settling_sample_index + analysis.samples_used,
-                    result.sample_count,
-                )
-                stable_start_t = float(result.timestamps[stable_start_idx])
-                stable_end_t = float(result.timestamps[stable_end_idx - 1]) if stable_end_idx > 0 else stable_start_t
+            if analysis:
                 ax.axhline(
                     analysis.stable_value,
                     color="tab:green",
@@ -414,8 +411,8 @@ def _run_capture_plot_live(
                     label=f"Stable = {analysis.stable_value:.4f} A",
                 )
                 ax.axvspan(
-                    stable_start_t,
-                    stable_end_t,
+                    analysis.start_time,
+                    analysis.end_time,
                     color="tab:green",
                     alpha=0.15,
                 )
@@ -461,8 +458,6 @@ def _run_capture_plot_live(
     if result_holder and result_holder[0] is None:
         sys.exit(1)
 
-
-# -- CLI dispatch ------------------------------------------------------------
 
 def _write_error(command: str, layer: str, exc: Exception) -> None:
     """Write a layered error to both stderr and result.txt.
@@ -513,9 +508,14 @@ def _run_capture_session(
     timeout: float,
     sample_callback: Callable[[float, float], None] | None = None,
     sentinel_path: Path | None = None,
-    adc_rate: str = "FAST",
+    adc_rate: str = DEFAULT_ADC_RATE,
+    samples_dir: Path = SCRIPT_DIR,
 ) -> tuple[CaptureResult, AnalysisResult]:
-    """Execute one capture session and return capture + analysis results."""
+    """Execute one capture session and return capture + analysis results.
+
+    Raw samples are written to *samples_dir* before the analysis runs, so a
+    capture whose analysis fails is still available for diagnosis.
+    """
     with HMC8012(address) as dmm:
         dmm.set_function("dci")
         dmm.set_adc_rate(adc_rate)
@@ -525,9 +525,23 @@ def _run_capture_session(
             sentinel_path=sentinel_path,
         )
         deadline = time.monotonic() + timeout
-        result = capture.run(deadline=deadline, sample_callback=sample_callback)
+        try:
+            result = capture.run(deadline=deadline, sample_callback=sample_callback)
+        except InsufficientSamplesError as exc:
+            _save_capture_samples(exc.result, samples_dir)
+            raise
+    _save_capture_samples(result, samples_dir)
+    if result.aborted_reason is not None:
+        raise CaptureAbortedError(result.aborted_reason)
     analysis = analyze_waveform(result.timestamps, result.values)
     return result, analysis
+
+
+def _save_capture_samples(result: CaptureResult, samples_dir: Path) -> None:
+    if len(result.timestamps) == 0:
+        return
+    samples_path = write_capture_samples(result, samples_dir)
+    print(f"[APP] Raw samples written to: {samples_path}", file=sys.stderr)
 
 
 def write_capture_samples(
@@ -597,7 +611,8 @@ def write_result(
 
 
 def _usage_error(message: str) -> None:
-    """Print error and usage, then exit with code 1."""
+    """Write ERR to result.txt, print error and usage, then exit with code 1."""
+    write_result("ERR", f"[APP] Usage error: {message}")
     print(f"[APP] Error: {message}", file=sys.stderr)
     print(
         "Usage:\n"
@@ -605,7 +620,7 @@ def _usage_error(message: str) -> None:
         "  python measure.py <address> range <function> <value>       Set range\n"
         "  python measure.py <address> reset                          Reset\n"
         "  python measure.py <address> capture [duration] [timeout]   Continuous DCI capture\n"
-        "  python measure.py <address> capture-plot start [FAST|SLOW|MED]  Capture until stop\n"
+        "  python measure.py <address> capture-plot start [SLOW|MED|FAST]  Capture until stop\n"
         "  python measure.py <address> capture-plot stop                  Stop running capture\n"
         "  python measure.py <address> capture-plot [duration] [timeout]  Timed capture (timeout optional)",
         file=sys.stderr,
@@ -620,14 +635,13 @@ def _usage_error(message: str) -> None:
 def main() -> None:
     """Dispatch CLI command based on arguments."""
     args = sys.argv[1:]
+    clear_result()
 
     if len(args) < 2:
         _usage_error(f"Expected at least 2 arguments, got {len(args)}.")
 
     address = args[0]
     command = args[1].lower()
-
-    clear_result()
 
     if command == "reset":
         if len(args) != 2:

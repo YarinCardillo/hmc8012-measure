@@ -33,7 +33,7 @@ class HMC8012:
         "cap", "temp", "freq", "cont", "diod",
     }
 
-    # Maps CLI function names to SCPI CONFigure command (used by set_range)
+    # Maps CLI function names to SCPI CONFigure command (used by set_function and set_range)
     FUNCTION_SCPI_MAP = {
         "dcv":  "CONF:VOLT:DC",
         "acv":  "CONF:VOLT:AC",
@@ -111,10 +111,15 @@ class HMC8012:
             self._cleanup_resources()
 
     def reset(self) -> None:
-        """Reset instrument to factory defaults and clear error queue."""
+        """Reset instrument to factory defaults and clear error queue.
+
+        Raises:
+            ScpiError: If the instrument reports an error after the reset.
+        """
         self._write("*RST")
         self._write("*CLS")
         self._query("*OPC?")
+        self._check_errors()
 
     def identify(self) -> str:
         """Return instrument identification string."""
@@ -132,6 +137,7 @@ class HMC8012:
 
         Raises:
             ValueError: If function is not recognized.
+            ScpiError: If the instrument rejects the command.
         """
         function = function.lower()
         if function not in self.FUNCTION_SCPI_MAP:
@@ -141,6 +147,7 @@ class HMC8012:
             )
         self._write(self.FUNCTION_SCPI_MAP[function])
         self._query("*OPC?")
+        self._check_errors()
 
     def measure(self) -> float:
         """Trigger a measurement and return the result.
@@ -162,7 +169,7 @@ class HMC8012:
         except ValueError as exc:
             raise ScpiError(f"Invalid measurement response: '{raw}'") from exc
 
-        if value >= self.OVERFLOW_SENTINEL:
+        if abs(value) >= self.OVERFLOW_SENTINEL:
             raise RangeOverflowError(
                 f"Range overflow (sentinel {raw}). "
                 "Use a wider range or check probe connections."
@@ -186,6 +193,7 @@ class HMC8012:
 
         Raises:
             ValueError: If function doesn't support range selection.
+            ScpiError: If the instrument rejects the command.
         """
         function = function.lower()
         if function not in self.RANGE_SCPI_MAP:
@@ -195,7 +203,6 @@ class HMC8012:
                 f"Valid: {valid}"
             )
 
-        # Select the measurement function
         self._write(self.FUNCTION_SCPI_MAP[function])
 
         # Set range via SENSe commands (survives across READ? calls)
@@ -207,6 +214,7 @@ class HMC8012:
             self._write(f"{prefix} {range_value}")
 
         self._query("*OPC?")
+        self._check_errors()
 
     def get_function(self) -> str:
         """Query the current measurement function.
@@ -236,6 +244,7 @@ class HMC8012:
 
         Raises:
             ValueError: If rate is not valid.
+            ScpiError: If the instrument rejects the command.
         """
         rate_upper = rate.upper()
         valid = {"SLOW", "MED", "FAST"}
@@ -245,6 +254,7 @@ class HMC8012:
             )
         self._write(f"ADCRate {rate_upper}")
         self._query("*OPC?")
+        self._check_errors()
 
     def get_range_auto(self, function: str) -> bool:
         """Query whether auto-range is enabled for the given function.
@@ -288,14 +298,12 @@ class HMC8012:
         except ValueError as exc:
             raise ScpiError(f"Invalid measurement response: '{raw}'") from exc
 
-        if value >= self.OVERFLOW_SENTINEL:
+        if abs(value) >= self.OVERFLOW_SENTINEL:
             raise RangeOverflowError(
                 f"Range overflow (sentinel {raw}). "
                 "Use a wider range or check probe connections."
             )
         return value
-
-    # -- Private helpers --
 
     def _cleanup_resources(self) -> None:
         """Close instrument and resource manager, tolerating failures."""

@@ -2,6 +2,7 @@
 
 import time
 
+import numpy as np
 import pytest
 
 from capture import (
@@ -111,7 +112,9 @@ class TestTimestamps:
         instrument = make_fake_instrument([1.0] * 10)
         capture = ContinuousCapture(instrument, max_duration=10.0)
         result = capture.run()
-        assert len(result.timestamps) == len(result.values) == result.sample_count
+        assert len(result.timestamps) == len(result.values)
+        # The five failed readings that end the capture stay as NaN markers.
+        assert result.sample_count == int(np.count_nonzero(np.isfinite(result.values))) == 10
 
 
 class TestSentinelFile:
@@ -171,7 +174,7 @@ class TestSentinelFile:
 class TestErrorHandling:
     """Skip failed samples; abort on consecutive failures; insufficient samples."""
 
-    def test_skips_failed_samples(self, make_fake_instrument):
+    def test_failed_readings_are_kept_as_nan_markers(self, make_fake_instrument):
         class FailingInstrument:
             def __init__(self):
                 self._readings = [1.0, 2.0, 3.0, 4.0, 5.0]
@@ -200,7 +203,9 @@ class TestErrorHandling:
         capture = ContinuousCapture(instrument, max_duration=10.0, min_samples=2)
         result = capture.run()
         assert result.sample_count == 4
-        assert list(result.values) == [1.0, 2.0, 4.0, 5.0]
+        assert np.isnan(result.values[2])
+        assert list(result.values[np.isfinite(result.values)]) == [1.0, 2.0, 4.0, 5.0]
+        assert len(result.timestamps) == len(result.values)
 
     def test_aborts_on_consecutive_failures(self, make_fake_instrument):
         class AllFailingInstrument:
@@ -220,6 +225,37 @@ class TestErrorHandling:
         capture = ContinuousCapture(instrument, max_duration=1.0, max_consecutive_failures=3)
         with pytest.raises(InsufficientSamplesError):
             capture.run()
+
+    def test_abort_on_consecutive_failures_is_recorded(self, make_fake_instrument):
+        instrument = make_fake_instrument([0.35] * 20)
+        capture = ContinuousCapture(instrument, max_duration=5.0, max_consecutive_failures=3)
+        result = capture.run()
+        assert result.sample_count == 20
+        assert "3 consecutive failed readings" in result.aborted_reason
+
+    def test_completed_capture_has_no_abort_reason(self):
+        class SteadyInstrument:
+            def measure_fast(self) -> float:
+                return 0.35
+
+            def get_function(self) -> str:
+                return "CURR"
+
+            def get_adc_rate(self) -> str:
+                return "SLOW"
+
+            def get_range_auto(self, function: str) -> bool:
+                return False
+
+        result = ContinuousCapture(SteadyInstrument(), max_duration=0.05).run()
+        assert result.aborted_reason is None
+
+    def test_insufficient_samples_error_carries_partial_capture(self, make_fake_instrument):
+        instrument = make_fake_instrument([0.35, 0.35, 0.35])
+        capture = ContinuousCapture(instrument, max_duration=10.0, min_samples=10)
+        with pytest.raises(InsufficientSamplesError) as excinfo:
+            capture.run()
+        assert excinfo.value.result.sample_count == 3
 
     def test_insufficient_samples_raises(self, make_fake_instrument):
         instrument = make_fake_instrument([1.0, 2.0, 3.0])
