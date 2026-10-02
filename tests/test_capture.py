@@ -117,6 +117,21 @@ class TestTimestamps:
         assert result.sample_count == int(np.count_nonzero(np.isfinite(result.values))) == 10
 
 
+class TestSampleCallback:
+    """Every reading reaches the callback as soon as it is taken (live plot)."""
+
+    def test_callback_receives_every_reading_including_failed_ones(self, make_fake_instrument):
+        instrument = make_fake_instrument([1.0, 2.0, 3.0])
+        received = []
+        result = ContinuousCapture(instrument, max_duration=10.0, min_samples=2).run(
+            on_sample=lambda time_s, value: received.append((time_s, value))
+        )
+        assert [time_s for time_s, _ in received] == list(result.timestamps)
+        assert [value for _, value in received][:3] == [1.0, 2.0, 3.0]
+        assert all(np.isnan(value) for _, value in received[3:])
+        assert len(received) == len(result.values)
+
+
 class TestErrorHandling:
     """Skip failed samples; abort on consecutive failures; insufficient samples."""
 
