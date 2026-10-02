@@ -10,9 +10,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -25,23 +25,38 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+      - name: Read version
+        id: version
+        run: |
+          $version = python -c "from version import __version__; print(__version__)"
+          "number=$version" >> $env:GITHUB_OUTPUT
+
       - name: Build hmc.exe
         run: >
-          python -m nuitka --onefile --enable-plugin=tk-inter --assume-yes-for-downloads
+          python -m nuitka --onefile --assume-yes-for-downloads
           --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py
-          --include-package=serial measure.py
+          --include-package=serial
+          --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI"
+          --file-version=${{ steps.version.outputs.number }} --product-version=${{ steps.version.outputs.number }}
+          measure.py
 
       - name: Smoke test the executable
-        # A usage error must exit non-zero and write ERR, proving the bundled imports load.
         run: |
+          $expected = "${{ steps.version.outputs.number }}"
+          # The executable reports the version it was built from, on the command line and in its file properties.
+          $reported = (.\hmc.exe --version).Trim()
+          if ($reported -ne $expected) { throw "hmc.exe --version reports '$reported', expected '$expected'" }
+          $fileVersion = (Get-Item .\hmc.exe).VersionInfo.ProductVersion
+          if (-not $fileVersion.StartsWith($expected)) { throw "file properties report '$fileVersion', expected '$expected'" }
+          # A usage error must exit non-zero and write ERR, proving the bundled imports load.
           .\hmc.exe 192.0.2.1 range temp 2
           if ($LASTEXITCODE -eq 0) { throw "hmc.exe accepted an invalid range command" }
           $first = Get-Content result.txt -TotalCount 1
           if ($first -ne "ERR") { throw "result.txt first line is '$first', expected ERR" }
           exit 0
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: hmc-exe-${{ github.sha }}
+          name: hmc-exe-v${{ steps.version.outputs.number }}-${{ github.sha }}
           path: hmc.exe
           if-no-files-found: error
