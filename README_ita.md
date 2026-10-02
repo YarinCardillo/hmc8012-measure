@@ -44,7 +44,7 @@ hmc.exe <address> reset
 
 ### Cattura continua DCI
 
-La cattura continua acquisisce campioni di corrente DC nel tempo, esegue la pipeline di analisi (picchi, assestamento, regione stabile) e scrive il **valore stabile** in `result.txt`. Impostare prima il fondo scala DCI (es. `range dci 0.2`). Vedi [Cattura continua: valore stabile](#cattura-continua-valore-stabile) per come si ricava il valore stabile.
+La cattura continua acquisisce campioni di corrente DC nel tempo, trova il regime e ne scrive la corrente media (il **valore stabile**) in `result.txt`. Impostare prima il fondo scala DCI (es. `range dci 0.2`). Vedi [Cattura continua: valore stabile](#cattura-continua-valore-stabile) per come si ricava il valore stabile.
 
 **Cattura a tempo (solo result.txt):**
 
@@ -65,10 +65,10 @@ Stessa regola per il timeout. Il grafico mostra la forma d’onda in tempo reale
 **Start/stop (senza durata fissa):**
 
 ```bat
-python measure.py <address> capture-plot start [FAST|SLOW|MED]
+python measure.py <address> capture-plot start [SLOW|MED|FAST]
 ```
 
-Esegue fino alla creazione del file sentinel (massimo 1 ora). Il rate ADC è opzionale (default FAST).
+Esegue fino alla creazione del file sentinel (massimo 1 ora). Il rate ADC è opzionale (default SLOW, usato anche da `capture` e da `capture-plot` a tempo: media il ripple dello stepper ed è l'unico rate con accuratezza specificata).
 
 ```bat
 python measure.py <address> capture-plot stop
@@ -87,10 +87,10 @@ Crea il file sentinel; il processo che ha eseguito `start` termina la cattura, e
 | `res` | Resistenza a 2 fili | `CONF:RES <range>` | 400, 4k, 40k, 400k, 4M, 40M, 250M |
 | `fres` | Resistenza a 4 fili | `CONF:FRES <range>` | 400, 4k, 40k, 400k, 4M |
 | `cap` | Capacità | `CONF:CAP <range>` | 5nF, 50nF, 500nF, 5uF, 50uF, 500uF |
-| `temp` | Temperatura (PT100) | `CONF:TEMP` | — |
-| `freq` | Frequenza | `CONF:FREQ` | — |
-| `cont` | Continuità | `CONF:CONT` | — |
-| `diod` | Test diodo | `CONF:DIOD` | — |
+| `temp` | Temperatura (PT100) | `CONF:TEMP` | n/d |
+| `freq` | Frequenza | `CONF:FREQ` | n/d |
+| `cont` | Continuità | `CONF:CONT` | n/d |
+| `diod` | Test diodo | `CONF:DIOD` | n/d |
 
 ### Valori di Fondo Scala (SCPI)
 
@@ -152,80 +152,63 @@ La riga `[APP]` identifica il comando fallito e il layer in cui si è verificato
 
 | Layer | Significato |
 |-|-|
-| `VISA/network` | Strumento non raggiunto — errore di connessione o trasporto |
+| `VISA/network` | Strumento non raggiunto: errore di connessione o trasporto |
 | `instrument SCPI` | Strumento raggiunto, ha riportato un errore SCPI tramite `SYST:ERR?` |
 | `instrument` | Strumento ha risposto correttamente, ma il valore indica overflow (`9.9e+37`) |
 | `input sanitization` | Argomento non valido, rifiutato prima di aprire la connessione |
-| `unexpected` | Eccezione non classificata — vedere `[EXC]` per i dettagli |
+| `unexpected` | Eccezione non classificata, vedere `[EXC]` per i dettagli |
 
 La riga `[EXC]` contiene il tipo di eccezione Python e il suo messaggio verbatim.
 
 **stderr** usa gli stessi prefissi per tutto l'output diagnostico:
-- `[APP]` — messaggio scritto dal nostro codice (avanzamento, risultato, classificazione errore)
-- `[EXC]` — tipo di eccezione e messaggio, solo in caso di errore
+- `[APP]`: messaggio scritto dal nostro codice (avanzamento, risultato, classificazione errore)
+- `[EXC]`: tipo di eccezione e messaggio, solo in caso di errore
 
 ## Cattura continua: valore stabile
 
-Il multimetro HMC8012 misura la corrente in continua (DCI). Lo script scrive in `result.txt` **un solo numero**: la **corrente stabile** (media di una fase a regime scelta), nello stesso formato della misura singola. **Modalità** (`analyzer.py`: `stable_target`): **baseline** (predefinita) — segmento “calmo” più lungo con media &lt; 0,4 A (baseline motore spento, es. 7–8,5 s). **post_peak** — regione assestata dopo l’ultimo picco (plateau motore acceso). Default: baseline.
+Lo script scrive un solo numero in `result.txt`: la **corrente media di alimentazione del dispositivo durante il regime**, dalla fine del transitorio di avvio allo stop, in una cattura del tipo idle, avvio/spunto, regime, stop, idle. Ripple, PWM e variazioni di carico durante il regime fanno parte della media. Il calcolo è in `analyzer.py` (`analyze_waveform`):
 
-Il valore stabile è la **media della corrente nella parte “calma” del segnale**, cioè dopo l’ultimo picco significativo e dopo che la corrente si è assestata. Viene calcolato in `analyzer.py` (`analyze_waveform`):
+1. **Validazione.** I timestamp devono essere strettamente crescenti. Letture NaN/inf e sentinelle di overflow (+/-9.9E37) sono campioni non validi; oltre il 20% di campioni non validi la cattura viene rifiutata.
+2. **Riferimento di idle.** La cattura deve iniziare con almeno 0.25 s di corrente di idle stabile (più metà della finestra di smoothing da 0.5 s): avviare la cattura prima che il dispositivo si muova.
+3. **Regime.** Il regime è dove la corrente smussata, pesata nel tempo, sta sopra l'idle di più di due tolleranze (i motori aggiungono soltanto corrente), per almeno `min_run_s` (0.5 s). Una cattura con due regimi separati viene rifiutata. I bordi del regime vengono rifiniti sulle letture grezze.
+4. **Finestra di media.** L'analyzer taglia l'inizio e la fine del regime (ciascuno fino a `max_settle_s`, default 1 s, a passi di 0.1 s, prima i tagli più piccoli) per escludere spunto, accelerazione e decelerazione. Una finestra è accettata quando non contiene letture non valide, i suoi blocchi da 1 s (due finestre di smoothing) concordano sulla media entro la tolleranza (max(2 mA, 2% della media), più il rumore delle letture) e la media è precisa: due errori standard, dalle letture e dalla dispersione delle medie dei blocchi, entro la tolleranza. Quindi il primo e l'ultimo `max_settle_s` del regime possono restare fuori quando differiscono dal resto: spunto, accelerazione, decelerazione, o un carico breve subito prima dello stop.
+5. **Risultato:** media pesata nel tempo sulla finestra, con ogni lettura mantenuta fino alla successiva, così poll irregolari e risposte `READ?` ripetute non la falsano.
 
-1. **Filtro overflow** — Il multimetro può restituire un valore sentinella (es. 9.9e+37) quando va in overflow. Questi punti vengono tolti da tempi e valori (tenendo allineati i due array). Se troppi campioni sono overflow, l’analisi fallisce.
+**Errori invece di numeri sbagliati.** `result.txt` riceve `ERR` con il motivo quando:
 
-2. **Ricerca dei picchi** — Si cercano i massimi locali con prominenza sufficiente (es. 3 volte la deviazione standard del segnale) per individuare lo spike della corrente (e eventuali altri picchi).
+| Errore | Significato | Cosa cambiare |
+|-|-|-|
+| `InvalidCaptureError` | Dati malformati, troppe letture non valide, nessun idle stabile all'inizio, o letture in overflow/NaN durante il regime | Avviare la cattura prima che il dispositivo si muova; alzare il fondo scala DCI se i picchi vanno in overflow; alzare `abs_tolerance_a` se la corrente di idle stessa fluttua di più di 2 mA |
+| `SignalNotSettledError` | Nessun regime, o regime non stabile: deriva, assestamento più lungo di `max_settle_s`, un secondo livello (mantenimento, standby dopo lo stop, altra velocità) | Catturare un solo regime stabile; aumentare `max_settle_s` per assestamenti lenti |
+| `AmbiguousRunError` | Più di un regime separato nella cattura | Un movimento per cattura |
+| `ImpreciseValueError` | Regime stabile ma media troppo incerta (rumore, burst lenti, poche letture) | Regime più lungo, ADC più lento o tolleranza più larga |
 
-3. **Ancoraggio all’ultimo picco** — Per il valore stabile si considera solo la coda del segnale **dopo** l’ultimo picco significativo.
+**I campioni grezzi** vengono sempre salvati in `capture_samples_<data UTC>.csv` prima dell'analisi, anche quando la cattura si interrompe, così una cattura fallita si può rianalizzare nel simulatore. Una lettura fallita (overflow, risposta illeggibile) resta come `nan` al suo istante: scartarla nasconderebbe il picco a cui apparteneva. Cinque letture fallite di fila interrompono la cattura e danno `ERR`.
 
-4. **Punto di settling (assestamento)** — Una finestra mobile (es. 20 campioni) e una soglia di std (es. 0.01 A) definiscono l’inizio della **regione stabile**.
+**Limiti noti.**
 
-5. **Regione stabile e media** — Tutti i campioni da quell'indice in poi formano la regione stabile. Il **valore stabile** è la **media** di quei campioni; **σ** è la **deviazione standard di quegli stessi campioni** (vedi sottosezione sotto).
+- Una corrente periodica (ripple di passo, PWM, burst) con frequenza multipla esatta o quasi esatta della frequenza di conversione ADC viene campionata in modo stroboscopico: le letture variano così lentamente, o per niente, che il regime sembra stabile al livello sbagliato. Il test a blocchi intercetta i battimenti lenti dentro il regime, ma un carico esattamente sincrono non è rilevabile dai campioni. SLOW integra su molti periodi del ripple veloce, quindi è il rate più sicuro (e l'unico con accuratezza specificata), ma un carico con periodo sottomultiplo dei suoi 200 ms di conversione può ancora dare aliasing se l'apertura dell'ADC è più corta del periodo di conversione (non indicato nel manuale; il simulatore assume il 50%).
+- Un livello diverso più breve di circa `max_settle_s` all'inizio o alla fine del regime viene tagliato come se fosse un transitorio.
 
-**Modalità predefinita: baseline.** Con `stable_target` **baseline** lo script trova il segmento **più lungo** consecutivo “calmo” (std bassa) con media &lt; 0,4 A (`baseline_threshold`, `min_baseline_samples`). Quel segmento (es. 6,4–9 s che include 7–8,5 s) è la zona verde; la sua media è il valore stabile. Usare **post_peak** quando interessa la corrente alta dopo l’ultimo impulso (vedi sotto).
+Nel grafico della cattura la zona verde è la finestra di media, la linea verde tratteggiata il valore riportato e sigma la deviazione standard delle letture nella finestra.
 
-### Come si ricava la regione stabile — post_peak (passo per passo)
+## Simulatore
 
-Abbiamo una sequenza di campioni di corrente nel tempo. In modalità **post_peak** la **regione stabile** è il tratto dopo l’ultimo picco in cui la corrente si è assestata. L'ordine è: **prima si individuano i picchi**, poi si prende la coda dopo l'ultimo picco, poi si salta un numero fisso di campioni, e **solo su quella coda** si applica la finestra mobile e la std per trovare dove il segnale diventa "calmo". Nel dettaglio:
+`simulate.py` esegue il vero analyzer su catture simulate realistiche (modello della corrente del dispositivo più modello di acquisizione dell'HMC8012) e confronta il risultato con il valore vero noto: PASS (entro tolleranza), FAIL (valore sbagliato), RAISE (errore esplicito).
 
-1. **Individuazione dei picchi sull'intero segnale (filtrato)**  
-   Eseguiamo la ricerca dei picchi sull'intera forma d'onda (es. spike di avvio e eventuali altri). Otteniamo una lista di indici dei picchi.  
-   **Funzioni usate:** `detect_peaks()` in `analyzer.py`, che chiama `scipy.signal.find_peaks(values, prominence=prominence_sigma * np.std(values), distance=min_peak_distance)`. Un picco viene mantenuto solo se la sua prominenza supera quella soglia e dista almeno `min_peak_distance` campioni dal precedente.
+```bash
+python simulate.py                                     # finestra interattiva: scenario, ADC rate, fondo scala, slider
+python simulate.py --scenario long_idle_after --adc SLOW
+python simulate.py --matrix --seeds 10                 # tabella PASS/FAIL/RAISE, tutti gli scenari x ADC rate
+python simulate.py --csv capture_samples_2026-10-01_15-00-00.csv   # rianalizza una cattura reale
+# opzioni comuni: --window S  --tolerance PCT  --min-run S  --max-settle S  --seed N  --save grafico.png
+```
 
-2. **Si usa solo la coda dopo l'ultimo picco**  
-   Teniamo solo la parte del segnale **dopo l'ultimo** picco. Tutto ciò che viene prima viene ignorato. Da qui in poi lavoriamo solo su questo tratto "post-picco".  
-   **Nel codice:** l'ultimo picco si ottiene con `anchor = peaks[-1]`. La coda usata nei passi successivi (dopo il salto di transitorio) è `filtered_vals[anchor.index + min_samples_after_peak:]`, salvata come `post_peak_values` in `analyze_waveform()`.
+Gli scenari (`scenarios.py`) modellano un dispositivo con motori passo-passo: regime nominale, idle lungo dopo lo stop, corrente di regime sopra 0.4 A, carico PWM veloce, burst più lenti della finestra, corrente di mantenimento dopo lo stop, mantenimento prima e dopo il movimento, assestamento lento, aliasing del ripple di passo in FAST, dispositivo ancora acceso a fine cattura, e ripple vicino alla frequenza di conversione FAST (il limite noto sopra). I livelli di corrente sono indicativi; si regolano con gli slider.
 
-3. **Salto fisso di campioni (transitorio)**  
-   Subito dopo il picco la corrente sta ancora scendendo. Saltiamo i primi **min_samples_after_peak** campioni (default 100) di questa coda, così non consideriamo la discesa come "stabile". Questo salto è il **salto di transitorio**.  
-   **Nel codice:** parametro `min_samples_after_peak` in `analyze_waveform()` in `analyzer.py` (default 100). La coda che poi scandiamo con la finestra inizia all'indice `anchor.index + min_samples_after_peak`.
+Modello di acquisizione (`simulation.py`): letture al secondo per ADC rate dal manuale HMC8012. Ogni conversione integra la corrente su un'apertura (assunta pari al 50% del periodo di conversione; non indicata nel manuale), viene quantizzata alla risoluzione del fondo scala e restituita da poll `READ?` che, in trigger AUTO, restituiscono l'ultima conversione (duplicati se si interroga più veloce dell'ADC). Le letture fuori scala diventano marcatori `nan` e cinque di fila terminano la cattura (esito RAISE), come fa il loop di cattura.
 
-4. **Finestra mobile e std su questa coda**  
-   Sul **resto** dei campioni (dopo il salto) facciamo scorrere una finestra di **settling_window** punti (default 20). Per ogni posizione calcoliamo la **deviazione standard** dei valori nella finestra. Dove il segnale è ancora in movimento la std è alta; dove è piatto è bassa.  
-   **Formula (Python/NumPy):** per ogni finestra usiamo la stessa definizione di `np.std(finestra)` con default `ddof=0`, cioè σ = sqrt(mean((x - mean(x))**2)). Nel codice, `find_settling_point()` in `analyzer.py` usa `sliding_window_view(values, window_size)` da `numpy.lib.stride_tricks`, poi `rolling_std = windows.std(axis=-1)` così che ogni elemento di `rolling_std` sia la std di una finestra.
-
-5. **Prima "sequenza calma"**  
-   Richiediamo che **n_settling_windows** finestre consecutive (default 3) abbiano std sotto **settling_threshold** (es. 0,01 A). **L'indice di inizio di quella sequenza** è il primo indice della regione stabile.  
-   **Nel codice:** `find_settling_point()` in `analyzer.py`, con `window_size=settling_window`, `std_threshold=settling_threshold`, `n_consecutive=n_settling_windows`. Tutti questi sono argomenti di `analyze_waveform()`.
-
-6. **Regione stabile = da quell'indice finché la std risale**  
-   Non usiamo tutto il resto della cattura fino alla fine: quando l'utente stoppa la cattura, il device può essersi già fermato e la corrente può avere una risalita/caduta finale. Quindi scandiamo in avanti dall'inizio del settling e **terminiamo la regione stabile** quando la std mobile torna sopra la soglia (prima finestra che non è più "calma"). Tutti i campioni dall'inizio del settling a quell'indice formano la **regione stabile** (zona verde). Su quelli calcoliamo la **media** (valore stabile) e la **std** (σ).
-
-In sintesi: **ricerca picchi → coda dopo l'ultimo picco → salto transitorio → finestra mobile + std → prima sequenza di 3 finestre calme (inizio) → scandire in avanti finché la std risale (fine) → regione stabile = solo quel segmento.** I parametri configurabili sono in `analyzer.py`: in `analyze_waveform()` per `min_samples_after_peak`, `settling_window`, `settling_threshold`, `n_settling_windows`; in `find_settling_point()` la logica finestra/std.
-
-### Regione stabile, valore stabile e σ (deviazione standard)
-
-La **zona verde** nel grafico è la **regione stabile**: l'insieme dei campioni dal punto di settling fino al punto in cui la std mobile risale (non necessariamente fino alla fine della cattura). Le tre grandezze usano **esattamente quello stesso insieme di campioni**:
-
-| Grandezza | Significato | Come si calcola |
-|-----------|-------------|-----------------|
-| **Regione stabile** (zona verde) | La parte del segnale considerata assestata (corrente a regime). | Dall'indice di settling all'indice in cui la std mobile torna per la prima volta sopra soglia (ci fermiamo prima di una risalita/caduta finale). |
-| **Valore stabile** (linea + numero) | La corrente che riportiamo. | **Media** dei campioni nella regione stabile. |
-| **σ** (sigma nel box) | Quanto varia la corrente **dentro** la zona verde. | **Deviazione standard** degli **stessi** campioni usati per la media. |
-
-Quindi: **σ è la deviazione standard dei campioni dentro la zona verde.** Stessa fetta di dati → media = valore stabile, std = σ. Se σ è piccolo (es. pochi mA), la zona è piatta e la misura è affidabile. Se σ è grande (es. vicino alla media o quasi mezzo ampere), la regione può ancora includere transitorio (il settling parte troppo in anticipo) oppure il segnale è rumoroso; è un avviso di qualità.
-
-**Dove succede:** `analyzer.py` (filter_overflows, detect_peaks, find_settling_point, analyze_waveform); `capture.py` (loop ContinuousCapture, CaptureResult, precondizioni: DCI, rate ADC FAST/SLOW/MED, range non in auto); `hmc8012.py` (measure_fast, get_function, get_adc_rate, get_range_auto); `measure.py` (cmd_capture, cmd_capture_plot, _run_capture_session, start/stop); `plotting.py` (show_capture_plot; grafico live in measure.py).
-
----
+Grafico: linea grigia = corrente vera, punti blu = campioni, linea arancione = livello smussato, banda grigia = regime, banda verde e linea tratteggiata = finestra di media e valore riportato, linea nera punteggiata = valore atteso. Il riquadro del titolo è verde (PASS), rosso (FAIL) o arancione (RAISE).
 
 ## Come Funziona
 
@@ -335,8 +318,13 @@ flowchart LR
 | `measure.py` | Entry point CLI: gestione comandi, parsing argomenti, ritardo, capture/capture-plot, output su file |
 | `hmc8012.py` | Driver strumento HMC8012: connessione, comandi SCPI, misura, fondo scala |
 | `capture.py` | ContinuousCapture: loop di campionamento DCI, sentinel/deadline, sample_callback per grafico live |
-| `analyzer.py` | Analisi forma d’onda: filtro overflow, picchi, punto di settling, valore stabile (media della regione stabile) |
+| `analyzer.py` | Analisi della corrente di regime: validazione, rilevamento idle e regime, finestra di media stabile, controllo di precisione |
 | `plotting.py` | Grafico post-cattura; il grafico live durante la cattura è in measure.py |
+| `simulation.py` | Modello fisico: fasi della corrente del dispositivo e acquisizione HMC8012 (apertura, quantizzazione, poll READ?) |
+| `scenarios.py` | Catalogo scenari per il simulatore e i test dell'analyzer |
+| `simulator_core.py` | Esegue e valuta l'analyzer su catture simulate; carica i CSV delle catture |
+| `simulator_view.py` | Grafici matplotlib e finestra interattiva del simulatore |
+| `simulate.py` | CLI del simulatore |
 
 ## Riferimento al Codice
 
@@ -359,7 +347,7 @@ Classe driver per l'R&S HMC8012. Supporta i trasporti LAN (socket TCPIP) e COM (
 | --- | --- | --- |
 | `OVERFLOW_SENTINEL` | `9.90000000E+37` | Valore restituito dallo strumento in caso di overflow del fondo scala. |
 | `SCPI_PORT` | `5025` | Porta TCP usata per le connessioni socket LAN SCPI. |
-| `DEFAULT_TIMEOUT_MS` | `5000` | Timeout default per la comunicazione VISA, in millisecondi. |
+| `DEFAULT_TIMEOUT_MS` | `8000` | Timeout default per la comunicazione VISA, in millisecondi. |
 | `MAX_ERROR_QUEUE_DEPTH` | `50` | Numero massimo di iterazioni per svuotare la coda errori dello strumento. |
 
 ##### Mappe
@@ -400,7 +388,7 @@ Associa i nomi delle funzioni al prefisso SCPI SENSe usato da `set_range()` per 
 
 | Firma | Descrizione |
 |-|-|
-| `__init__(address, timeout_ms=5000)` | Costruisce la stringa di risorsa VISA da `address` (IP o porta COM). Non apre la connessione. |
+| `__init__(address, timeout_ms=8000)` | Costruisce la stringa di risorsa VISA da `address` (IP o porta COM). Non apre la connessione. |
 | `connect() → None` | Apre la risorsa VISA, imposta i caratteri di terminazione, invia `*CLS`, `SYSTem:REMote`. **Non** resetta lo strumento. Chiamato automaticamente da `__enter__`. |
 | `close() → None` | Svuota la coda errori dello strumento, invia `SYSTem:LOCal` per ripristinare il controllo dal pannello frontale, chiude la risorsa VISA. Chiamato automaticamente da `__exit__`. |
 | `reset() → None` | Invia `*RST`, `*CLS`, poi `*OPC?` per confermare il completamento. Ripristina i valori di fabbrica. |
@@ -445,25 +433,29 @@ Associa i nomi delle funzioni al prefisso SCPI SENSe usato da `set_range()` per 
 
 ## Compilazione dell'Eseguibile Standalone
 
-Per distribuire il tool come `hmc.exe` autocontenuto (senza Python né NI-VISA sulla macchina target), compilare con Nuitka **su una macchina Windows**.
+Per distribuire lo strumento come `hmc.exe` autonomo (senza Python né NI-VISA sulla macchina di destinazione), va compilato con Nuitka su Windows.
 
-> **Versione Python:** il compilatore MinGW-w64 bundled di Nuitka non supporta Python 3.13+. Usare **Python 3.12** per compilare.
+**Da GitHub (senza macchina Windows).** Ogni push su `master` esegue `.github/workflows/build-windows.yml` su un runner Windows: installa Python 3.12, esegue i test, compila `hmc.exe`, verifica che si avvii e lo pubblica come artifact `hmc-exe-<commit>` nella pagina della run, nella scheda Actions del repository. Il workflow si può anche avviare a mano da lì (Run workflow).
+
+**Su una macchina Windows.** Usare **Python 3.12** (il MinGW-w64 incluso in Nuitka non supporta la 3.13+):
 
 ```bat
-pip install nuitka pyvisa pyvisa-py pyserial
-python -m nuitka --onefile --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial measure.py
+pip install -r requirements.txt nuitka
+python -m pytest -q
+python -m nuitka --onefile --enable-plugin=tk-inter --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial measure.py
 ```
 
-Al primo avvio Nuitka chiederà di scaricare MinGW-w64 se non trova un compilatore C: rispondere `yes`.
-
-Il file `hmc.exe` generato si trova nella directory corrente e accetta gli stessi argomenti di `python measure.py`.
+`hmc.exe` accetta gli stessi argomenti di `python measure.py` e scrive `result.txt` e i CSV delle catture accanto a sé, quindi va messo in una cartella scrivibile. Il collegamento COM (USB) richiede il driver VCP dell'HMC8012; la LAN non richiede nulla.
 
 ## Dipendenze
 
-- Python 3.x
+- Python 3.11 o successivo (3.12 per compilare l'eseguibile)
 - `pyvisa` - comunicazione VISA con gli strumenti
 - `pyvisa-py` - backend VISA in puro Python (non richiede NI-VISA per connessioni LAN)
 - `pyserial` - richiesto su Windows per le connessioni via porta COM
+- `numpy` - analisi delle catture
+- `matplotlib` - grafici delle catture e simulatore
+- `pytest` - test
 
 ```bash
 pip install -r requirements.txt

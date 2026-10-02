@@ -44,7 +44,7 @@ hmc.exe <address> reset
 
 ### Continuous DCI capture
 
-Continuous capture samples DC current over time, runs the analysis pipeline (peaks, settling, stable region), and writes the **stable value** to `result.txt`. Set the DCI range first (e.g. `range dci 0.2`). See [Continuous capture: stable value](#continuous-capture-stable-value) for how the stable value is derived.
+Continuous capture samples DC current over time, finds the run, and writes its mean current (the **stable value**) to `result.txt`. Set the DCI range first (e.g. `range dci 0.2`). See [Continuous capture: stable value](#continuous-capture-stable-value) for how the stable value is derived.
 
 **Timed capture (and result.txt only):**
 
@@ -65,10 +65,10 @@ Same timeout rule. The plot shows the waveform in real time and, at the end, the
 **Start/stop (no fixed duration):**
 
 ```bat
-python measure.py <address> capture-plot start [FAST|SLOW|MED]
+python measure.py <address> capture-plot start [SLOW|MED|FAST]
 ```
 
-Runs until a sentinel file is created (up to 1 hour). ADC rate is optional (default FAST).
+Runs until a sentinel file is created (up to 1 hour). ADC rate is optional (default SLOW, also used by `capture` and timed `capture-plot`: it averages the stepper ripple and is the only rate with specified accuracy).
 
 ```bat
 python measure.py <address> capture-plot stop
@@ -87,10 +87,10 @@ Creates the sentinel file; the process that ran `start` finishes the capture, ru
 | `res` | 2-Wire Resistance | `CONF:RES <range>` | 400, 4k, 40k, 400k, 4M, 40M, 250M |
 | `fres` | 4-Wire Resistance | `CONF:FRES <range>` | 400, 4k, 40k, 400k, 4M |
 | `cap` | Capacitance | `CONF:CAP <range>` | 5nF, 50nF, 500nF, 5uF, 50uF, 500uF |
-| `temp` | Temperature (PT100) | `CONF:TEMP` | — |
-| `freq` | Frequency | `CONF:FREQ` | — |
-| `cont` | Continuity | `CONF:CONT` | — |
-| `diod` | Diode Test | `CONF:DIOD` | — |
+| `temp` | Temperature (PT100) | `CONF:TEMP` | n/a |
+| `freq` | Frequency | `CONF:FREQ` | n/a |
+| `cont` | Continuity | `CONF:CONT` | n/a |
+| `diod` | Diode Test | `CONF:DIOD` | n/a |
 
 ### Range Values (SCPI)
 
@@ -152,82 +152,63 @@ The `[APP]` line identifies the failing command and the layer where the error or
 
 | Layer | Meaning |
 |-|-|
-| `VISA/network` | Instrument not reached — connection or transport failure |
+| `VISA/network` | Instrument not reached: connection or transport failure |
 | `instrument SCPI` | Instrument reached, reported a SCPI error via `SYST:ERR?` |
 | `instrument` | Instrument responded correctly, but value indicates overflow (`9.9e+37`) |
 | `input sanitization` | Invalid argument rejected before opening the connection |
-| `unexpected` | Unclassified exception — see `[EXC]` for details |
+| `unexpected` | Unclassified exception, see `[EXC]` for details |
 
 The `[EXC]` line contains the Python exception type and its message verbatim.
 
 **stderr** uses the same prefixes for all diagnostic output:
-- `[APP]` — message written by our code (progress, result, error classification)
-- `[EXC]` — exception type and message, only on error
+- `[APP]`: message written by our code (progress, result, error classification)
+- `[EXC]`: exception type and message, only on error
 
 ## Continuous capture: stable value
 
-The HMC8012 measures DC current (DCI). The script writes a single number to `result.txt`: the **stable current** (mean of a chosen steady phase), in the same format as a single measurement.
+The script writes one number to `result.txt`: the **mean supply current of the device over its run**, from the end of the start transient to the stop, in a capture shaped idle, start/inrush, run, stop, idle. Ripple, PWM and load variations during the run are part of the mean. It is computed in `analyzer.py` (`analyze_waveform`):
 
-**Modes** (`analyzer.py`: `stable_target`): **baseline** (default) — longest quiet segment with mean &lt; 0.4 A (motor-off baseline, e.g. 7–8.5 s). **post_peak** — settled region after the last peak (motor-on plateau).
+1. **Validate.** Timestamps must be strictly increasing. NaN/inf readings and overflow sentinels (+/-9.9E37) are invalid samples; more than 20% invalid samples reject the capture.
+2. **Idle reference.** The capture must open with at least 0.25 s of steady idle current (plus half the 0.5 s smoothing window), so start the capture before the device moves.
+3. **Run.** The run is where the time-weighted smoothed current sits above idle by more than two tolerances (the motors only add current), for at least `min_run_s` (0.5 s). A capture with two separate runs is rejected. The run edges are refined on the raw readings.
+4. **Averaging window.** The analyzer trims the start and the end of the run (each by up to `max_settle_s`, default 1 s, in 0.1 s steps, smallest trims first) to drop inrush, acceleration and deceleration. A window is accepted when it holds no invalid reading, its blocks of 1 s (two smoothing windows) agree on the mean within the tolerance (max(2 mA, 2% of the mean), plus the reading noise), and the mean is precise: two standard errors, from the readings and from the spread of the block means, within the tolerance. So the first and last `max_settle_s` of the run may be left out when they differ from the rest: inrush, acceleration, deceleration, or a brief load just before the stop.
+5. **Report** the time-weighted mean over the window, each reading held until the next one, so uneven polling and repeated `READ?` answers do not bias it.
 
-The stable value is the **mean of the current in the “quiet” part of the signal** — after the last significant peak and after the current has settled. It is computed in `analyzer.py` (`analyze_waveform`):
+**Errors instead of wrong numbers.** `result.txt` gets `ERR` with the reason when:
 
-1. **Overflow filter** — The meter can return a sentinel value (e.g. 9.9e+37) on overflow. Those points are removed from time and value arrays (keeping them aligned). If too many samples are overflow, analysis fails.
+| Error | Meaning | What to change |
+|-|-|-|
+| `InvalidCaptureError` | Malformed data, too many invalid readings, no steady idle at the start, or overflow/NaN readings inside the run | Start the capture before the device moves; raise the DCI range if peaks overflow; raise `abs_tolerance_a` if the idle current itself fluctuates by more than 2 mA |
+| `SignalNotSettledError` | No run, or a run that is not steady: drift, settling longer than `max_settle_s`, a second level (hold, standby after the stop, another speed) | Capture one steady run; raise `max_settle_s` for slow settling |
+| `AmbiguousRunError` | More than one separate run in the capture | One move per capture |
+| `ImpreciseValueError` | Steady run, but the mean is too uncertain (noise, slow bursts, few readings) | Longer run, slower ADC rate, or looser tolerance |
 
-2. **Peak detection** — Local maxima with sufficient prominence (e.g. 3× the signal’s standard deviation) are found to locate the current spike (and any later peaks).
+**Raw samples** are always saved to `capture_samples_<UTC date>.csv` before the analysis, also when the capture stops early, so a failed capture can be replayed in the simulator. A failed reading (overflow, unreadable answer) is kept as `nan` at its time: dropping it would hide the peak it belonged to. Five failed readings in a row stop the capture and give `ERR`.
 
-3. **Anchor to last peak** — Only the tail of the signal **after** the last significant peak is used for the stable value.
+**Known limits.**
 
-4. **Settling point** — A sliding window (e.g. 20 samples) and a std threshold (e.g. 0.01 A) define the start of the **stable region**.
+- A periodic current (step ripple, PWM, bursts) whose frequency is an exact or near multiple of the ADC conversion rate is sampled stroboscopically: the readings drift so slowly, or not at all, that the run looks steady at the wrong level. The block test catches slow beats within the run, but an exactly synchronous load cannot be detected from the samples. SLOW integrates over many periods of fast ripple, so it is the safest rate (and the only one with specified accuracy), but a load whose period divides its 200 ms conversion period can still alias if the ADC aperture is shorter than the conversion period (not stated in the manual; the simulator assumes 50%).
+- A different level shorter than about `max_settle_s` at the start or end of the run is trimmed away as if it were a transient.
 
-5. **Stable region and mean** — All samples from that index onward form the stable region. The **stable value** is their **mean**; **σ** is the **standard deviation of those same samples** (see subsection below).
+In the capture plot the green zone is the averaging window, the green dashed line the reported value, and sigma the standard deviation of the readings in the window.
 
-**Default mode: baseline.** The default `stable_target` is **baseline**: the script finds the **longest** contiguous "quiet" (low std) segment whose mean current is below 0.4 A (configurable: `baseline_threshold`, `min_baseline_samples`). That segment (e.g. 6.4–9 s including 7–8.5 s) is the green zone; its mean is the stable value. Use **post_peak** when the value of interest is the high current after the last pulse (see below).
+## Simulator
 
-### How we derive the stable region — post_peak (step by step)
+`simulate.py` runs the real analyzer on realistic simulated captures (device current model plus HMC8012 acquisition model) and grades the result against the known true value: PASS (within tolerance), FAIL (wrong value), RAISE (explicit error).
 
-We have a sequence of current samples over time. For **post_peak** mode the **stable region** is the stretch after the last peak where the current has settled. The order of operations is: **first detect peaks**, then take the tail after the last peak, then skip a fixed number of samples, then **on that tail only** apply the sliding window and standard deviation to find where the signal becomes "quiet". Details:
+```bash
+python simulate.py                                     # interactive window: scenario, ADC rate, range, sliders
+python simulate.py --scenario long_idle_after --adc SLOW
+python simulate.py --matrix --seeds 10                 # PASS/FAIL/RAISE table, all scenarios x ADC rates
+python simulate.py --csv capture_samples_2026-10-01_15-00-00.csv   # replay a real capture
+# common options: --window S  --tolerance PCT  --min-run S  --max-settle S  --seed N  --save chart.png
+```
 
-1. **Detect peaks on the full (filtered) signal**  
-   We run peak detection on the whole waveform (e.g. inrush spike and any later bumps). We get a list of peak indices.  
-   **Functions used:** `detect_peaks()` in `analyzer.py`, which calls `scipy.signal.find_peaks(values, prominence=prominence_sigma * np.std(values), distance=min_peak_distance)`. A peak is kept only if its prominence exceeds that threshold and it is at least `min_peak_distance` samples away from the previous one.
+Scenarios (`scenarios.py`) model a stepper-driven device: nominal run, long idle after the stop, running current above 0.4 A, fast PWM load, bursts slower than the window, hold current after the stop, hold before and after the move, slow settling, step ripple aliasing at FAST, device still running at capture end, and ripple near the FAST conversion rate (the known limit above). Supply-current levels are illustrative; tune them with the sliders.
 
-2. **Use only the tail after the last peak**  
-   We keep only the part of the signal **after the last** peak. Everything before that is ignored. From here on we work only on this "post-peak" segment.  
-   **In the code:** we take the last peak with `anchor = peaks[-1]`. The tail used for the next steps (after the transient skip) is `filtered_vals[anchor.index + min_samples_after_peak:]`, stored as `post_peak_values` in `analyze_waveform()`.
+Acquisition model (`simulation.py`): readings per second per ADC rate from the HMC8012 manual. Each conversion integrates the current over an aperture (assumed 50% of the conversion period; not stated in the manual), is quantized to the range resolution and returned by `READ?` polls that, in AUTO trigger, return the latest conversion (duplicates when polling faster than the ADC). Readings over range become `nan` markers and five in a row end the capture (graded RAISE), as the capture loop does.
 
-3. **Skip a fixed number of samples (transient)**  
-   Right after the peak the current is still decaying. We skip the first **min_samples_after_peak** samples (default 100) of that tail so we don't treat the decay as "stable". This skip is the **transient skip**.  
-   **In the code:** parameter `min_samples_after_peak` in `analyze_waveform()` in `analyzer.py` (default 100). The tail we actually scan with the window starts at index `anchor.index + min_samples_after_peak`.
-
-4. **Slide a window and compute std on this tail**  
-   On the **remaining** samples (after the skip) we slide a window of **settling_window** points (default 20). For each position we compute the **standard deviation** of the values in the window. Where the signal is still moving, std is high; where it's flat, std is low.  
-   **Formula (Python/NumPy):** for each window we use the same definition as `np.std(window)` with default `ddof=0`, i.e. σ = sqrt(mean((x - mean(x))**2)). In the code, `find_settling_point()` in `analyzer.py` uses `sliding_window_view(values, window_size)` from `numpy.lib.stride_tricks`, then `rolling_std = windows.std(axis=-1)` so that each element of `rolling_std` is the std of one window.
-
-5. **Find the first "quiet" run**  
-   We require **n_settling_windows** consecutive windows (default 3) to have std below **settling_threshold** (e.g. 0.01 A). The **start index of that run** is the first index of the stable region.  
-   **In the code:** `find_settling_point()` in `analyzer.py`, with `window_size=settling_window`, `std_threshold=settling_threshold`, `n_consecutive=n_settling_windows`. All these are arguments of `analyze_waveform()`.
-
-6. **Stable region = from that index until std rises again**  
-   We do **not** use the rest of the capture to the end: when the user stops the capture, the device may already have stopped and the current can show a final rise/fall. So we scan forward from the settling start and **end the stable region** when the rolling std goes back above the threshold (first window that is no longer "quiet"). All samples from the settling start to that end form the **stable region** (the green zone). We take the **mean** of those samples as the stable value and their **std** as σ.
-
-Summary: **Peak detection → tail after last peak → transient skip → sliding window + std → first run of 3 quiet windows (start) → scan forward until std rises again (end) → stable region = that segment only.** Configurable parameters are in `analyzer.py`: `analyze_waveform()` for `min_samples_after_peak`, `settling_window`, `settling_threshold`, `n_settling_windows`; `find_settling_point()` for the window/std logic.
-
-### Stable region, stable value, and σ (standard deviation)
-
-The **green zone** in the plot is the **stable region**: the set of samples from the settling point to the point where the rolling std rises again (not necessarily to the end of the capture). All three quantities use **exactly that same set of samples**:
-
-| Quantity | Meaning | How it is computed |
-|----------|---------|--------------------|
-| **Stable region** (green zone) | The part of the signal considered settled (current at regime). | From the settling index to the index where rolling std first goes back above threshold (so we stop before a final rise/fall). |
-| **Stable value** (line + number) | The current we report. | **Mean** of the samples in the stable region. |
-| **σ** (sigma in the box) | How much the current varies inside the green zone. | **Standard deviation** of the **same** samples used for the mean. |
-
-So: **σ is the standard deviation of the samples inside the green zone.** Same slice of data → mean = stable value, std = σ. If σ is small (e.g. a few mA), the zone is flat and the measure is reliable. If σ is large (e.g. close to the mean or half an ampere), either the region still includes transient (settling may start too early) or the signal is noisy; it is a quality warning.
-
-**Where it happens:** `analyzer.py` (filter_overflows, detect_peaks, find_settling_point, analyze_waveform); `capture.py` (ContinuousCapture loop, CaptureResult, preconditions: DCI, ADC rate FAST/SLOW/MED, range not auto); `hmc8012.py` (measure_fast, get_function, get_adc_rate, get_range_auto); `measure.py` (cmd_capture, cmd_capture_plot, _run_capture_session, start/stop); `plotting.py` (show_capture_plot; live plot is in measure.py).
-
----
+Chart: grey line = true current, blue dots = samples, orange line = smoothed level, grey band = run, green band and dashed line = averaging window and reported value, black dotted line = expected value. The title box is green (PASS), red (FAIL) or orange (RAISE).
 
 ## How It Works
 
@@ -337,8 +318,13 @@ flowchart LR
 | `measure.py` | CLI entry point: command dispatch, arg parsing, delay, capture/capture-plot, file output |
 | `hmc8012.py` | HMC8012 instrument driver: connection, SCPI commands, measurement, range |
 | `capture.py` | ContinuousCapture: DCI sampling loop, sentinel/deadline, sample_callback for live plot |
-| `analyzer.py` | Waveform analysis: overflow filter, peak detection, settling point, stable value (mean of stable region) |
+| `analyzer.py` | Running-current analysis: validation, idle and run detection, steady averaging window, precision check |
 | `plotting.py` | Post-capture plot; live plot during capture is implemented in measure.py |
+| `simulation.py` | Physical model: device current phases and HMC8012 acquisition (aperture, quantization, READ? polling) |
+| `scenarios.py` | Scenario catalogue for the simulator and the analyzer tests |
+| `simulator_core.py` | Runs and grades the analyzer on simulated captures; loads capture CSV files |
+| `simulator_view.py` | Matplotlib charts and the interactive simulator window |
+| `simulate.py` | Simulator CLI |
 
 ## Code Reference
 
@@ -361,7 +347,7 @@ Driver class for the R&S HMC8012. Supports both LAN (TCPIP socket) and COM (seri
 | --- | --- | --- |
 | `OVERFLOW_SENTINEL` | `9.90000000E+37` | Value returned by the instrument on range overflow. |
 | `SCPI_PORT` | `5025` | TCP port used for LAN SCPI socket connections. |
-| `DEFAULT_TIMEOUT_MS` | `5000` | Default VISA communication timeout in milliseconds. |
+| `DEFAULT_TIMEOUT_MS` | `8000` | Default VISA communication timeout in milliseconds. |
 | `MAX_ERROR_QUEUE_DEPTH` | `50` | Maximum iterations when draining the instrument error queue. |
 
 ##### Maps
@@ -402,7 +388,7 @@ Maps function names to the SENSe SCPI prefix used by `set_range()` for range con
 
 | Signature | Description |
 |-|-|
-| `__init__(address, timeout_ms=5000)` | Builds the VISA resource string from `address` (IP or COM port). Does not open the connection. |
+| `__init__(address, timeout_ms=8000)` | Builds the VISA resource string from `address` (IP or COM port). Does not open the connection. |
 | `connect() → None` | Opens the VISA resource, sets termination characters, sends `*CLS`, `SYSTem:REMote`. Does **not** reset the instrument. Called automatically by `__enter__`. |
 | `close() → None` | Drains the instrument error queue, sends `SYSTem:LOCal` to restore front-panel control, closes the VISA resource. Called automatically by `__exit__`. |
 | `reset() → None` | Sends `*RST`, `*CLS`, then `*OPC?` to confirm completion. Restores factory defaults. |
@@ -447,25 +433,29 @@ Maps function names to the SENSe SCPI prefix used by `set_range()` for range con
 
 ## Building the Standalone Executable
 
-To distribute the tool as a self-contained `hmc.exe` (no Python or NI-VISA required on the target machine), compile with Nuitka **on a Windows machine**.
+To distribute the tool as a self-contained `hmc.exe` (no Python or NI-VISA required on the target machine), compile it with Nuitka on Windows.
 
-> **Python version:** Nuitka's bundled MinGW-w64 compiler does not support Python 3.13+. Use **Python 3.12** to compile.
+**From GitHub (no Windows machine needed).** Every push to `master` runs `.github/workflows/build-windows.yml` on a Windows runner: it installs Python 3.12, runs the test suite, builds `hmc.exe`, checks that it starts, and publishes it as the artifact `hmc-exe-<commit>` on the run's page under the repository's Actions tab. The workflow can also be started by hand there (Run workflow).
+
+**On a Windows machine.** Use **Python 3.12** (Nuitka's bundled MinGW-w64 does not support 3.13+):
 
 ```bat
-pip install nuitka pyvisa pyvisa-py pyserial
-python -m nuitka --onefile --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial measure.py
+pip install -r requirements.txt nuitka
+python -m pytest -q
+python -m nuitka --onefile --enable-plugin=tk-inter --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial measure.py
 ```
 
-On the first run Nuitka will prompt to download MinGW-w64 if no C compiler is found: answer `yes`.
-
-The resulting `hmc.exe` is placed in the current directory and accepts the same arguments as `python measure.py`.
+The resulting `hmc.exe` accepts the same arguments as `python measure.py` and writes `result.txt` and the capture CSV files next to itself, so place it in a writable folder. A COM (USB) connection needs the HMC8012 VCP driver; LAN needs nothing.
 
 ## Dependencies
 
-- Python 3.x
+- Python 3.11 or newer (3.12 to compile the executable)
 - `pyvisa` - VISA instrument communication
 - `pyvisa-py` - Pure Python VISA backend (no NI-VISA required for LAN)
 - `pyserial` - Required on Windows for COM port connections
+- `numpy` - capture analysis
+- `matplotlib` - capture plots and the simulator
+- `pytest` - test suite
 
 ```bash
 pip install -r requirements.txt
