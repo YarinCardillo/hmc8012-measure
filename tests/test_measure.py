@@ -214,17 +214,52 @@ def test_saved_samples_survive_a_failed_capture(tmp_path: Path, monkeypatch, dmm
 
 
 @pytest.mark.parametrize("args, expected", [
-    ([], (10.0, 20.0, False, False, False)),
-    (["5"], (5.0, 15.0, False, False, False)),
-    (["5", "8"], (5.0, 8.0, False, False, False)),
-    (["5", "--save-samples"], (5.0, 15.0, True, False, False)),
-    (["--save-samples", "5", "8"], (5.0, 8.0, True, False, False)),
-    (["5", "--save-plot"], (5.0, 15.0, False, True, False)),
-    (["--live", "5"], (5.0, 15.0, False, False, True)),
-    (["--live", "--save-plot", "--save-samples"], (10.0, 20.0, True, True, True)),
+    ([], (30.0, 40.0, False, False, False, True)),
+    (["5"], (5.0, 15.0, False, False, False, False)),
+    (["5", "8"], (5.0, 8.0, False, False, False, False)),
+    (["5", "--save-samples"], (5.0, 15.0, True, False, False, False)),
+    (["--save-samples", "5", "8"], (5.0, 8.0, True, False, False, False)),
+    (["5", "--save-plot"], (5.0, 15.0, False, True, False, False)),
+    (["--live", "5"], (5.0, 15.0, False, False, True, False)),
+    (["--live", "--save-plot", "--save-samples"], (30.0, 40.0, True, True, True, True)),
 ])
 def test_capture_arguments_accept_optional_flags_in_any_position(args, expected) -> None:
     assert measure_module._parse_capture_args(args) == expected
+
+
+class _StopAfter:
+    """Stop detector double: stops at the given reading, standing in for seconds of real idle."""
+
+    def __init__(self, readings: int) -> None:
+        self._readings_left = readings
+
+    def should_stop(self, time_s: float, value: float) -> bool:
+        self._readings_left -= 1
+        return self._readings_left == 0
+
+
+@pytest.mark.parametrize("stop_on_idle, stops_early", [(True, True), (False, False)])
+def test_only_an_auto_stop_capture_ends_when_the_device_is_back_at_idle(monkeypatch, stop_on_idle, stops_early) -> None:
+    _use_fake(monkeypatch, _FakeDmm())
+    monkeypatch.setattr(measure_module, "StopDetector", lambda: _StopAfter(12))
+    monkeypatch.setattr(measure_module, "analyze_waveform", lambda times, values: _analysis())
+    result, _ = measure_module._run_capture_session("192.0.2.1", 0.3, 5.0, stop_on_idle=stop_on_idle)
+    assert (len(result.values) == 12) == stops_early
+
+
+@pytest.mark.parametrize("args, stop_on_idle", [([], True), (["10"], False)])
+def test_capture_without_a_duration_stops_on_idle(monkeypatch, args, stop_on_idle) -> None:
+    sessions = []
+
+    def fake_session(address, duration, timeout, **kwargs):
+        sessions.append(kwargs["stop_on_idle"])
+        raise AnalysisError("stop here")
+
+    monkeypatch.setattr(measure_module, "_run_capture_session", fake_session)
+    monkeypatch.setattr(measure_module, "write_result", lambda *lines: None)
+    with pytest.raises(SystemExit):
+        measure_module.cmd_capture("192.0.2.1", args)
+    assert sessions == [stop_on_idle]
 
 
 def _analysis() -> AnalysisResult:
