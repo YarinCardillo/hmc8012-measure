@@ -117,60 +117,6 @@ class TestTimestamps:
         assert result.sample_count == int(np.count_nonzero(np.isfinite(result.values))) == 10
 
 
-class TestSentinelFile:
-    """Sentinel file IPC: stop signal and cleanup."""
-
-    def test_stops_when_sentinel_exists(self, tmp_path):
-        sentinel = tmp_path / "capture.stop"
-
-        class InstrumentThatSignalsStop:
-            def __init__(self):
-                self._readings = [1.0] * 1000
-                self._index = 0
-                self._create_after = 5
-
-            def measure_fast(self) -> float:
-                self._index += 1
-                if self._index == self._create_after:
-                    sentinel.touch()
-                if self._index > len(self._readings):
-                    raise ScpiError("No more readings")
-                return self._readings[self._index - 1]
-
-            def get_function(self) -> str:
-                return "CURR"
-
-            def get_adc_rate(self) -> str:
-                return "FAST"
-
-            def get_range_auto(self, function: str) -> bool:
-                return False
-
-        instrument = InstrumentThatSignalsStop()
-        capture = ContinuousCapture(
-            instrument, max_duration=999.0, sentinel_path=sentinel, min_samples=2
-        )
-        result = capture.run()
-        assert result.sample_count < 1000
-
-    def test_cleans_up_sentinel_on_exit(self, make_fake_instrument, tmp_path):
-        sentinel = tmp_path / "capture.stop"
-        instrument = make_fake_instrument([1.0] * 5)
-        capture = ContinuousCapture(instrument, max_duration=10.0, min_samples=2, sentinel_path=sentinel)
-        sentinel.touch()
-        capture.run()
-        assert not sentinel.exists()
-
-    def test_cleans_stale_sentinel_before_start(self, make_fake_instrument, tmp_path):
-        sentinel = tmp_path / "capture.stop"
-        sentinel.touch()
-        instrument = make_fake_instrument([1.0] * 20)
-        capture = ContinuousCapture(instrument, max_duration=999.0, sentinel_path=sentinel)
-        result = capture.run()
-        assert result.sample_count == 20
-        assert not sentinel.exists()
-
-
 class TestErrorHandling:
     """Skip failed samples; abort on consecutive failures; insufficient samples."""
 

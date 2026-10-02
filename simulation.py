@@ -40,7 +40,7 @@ class Phase:
     """One segment of the device current profile.
 
     Attributes:
-        name: Label shown in plots (e.g. "idle", "run", "hold").
+        name: Label used in error messages (e.g. "idle", "run", "hold").
         duration_s: Phase length in seconds.
         level_a: Steady current of the phase in amperes.
         start_level_a: If set, the current starts here and decays
