@@ -35,6 +35,17 @@ class TestPreconditions:
         with pytest.raises(CaptureConfigError):
             capture.run()
 
+    @pytest.mark.parametrize("function, reply", [("dcv", "VOLT"), ("acv", "VOLT:AC"), ("aci", "CURR:AC")])
+    def test_captures_the_other_dc_and_ac_functions(self, make_fake_instrument, function, reply):
+        instrument = make_fake_instrument([1.0, 2.0], function=reply)
+        result = ContinuousCapture(instrument, function=function, min_samples=2).run()
+        assert list(result.values[:2]) == [1.0, 2.0]
+
+    def test_rejects_an_instrument_set_to_another_function(self, make_fake_instrument):
+        instrument = make_fake_instrument([1.0], function="CURR")
+        with pytest.raises(CaptureConfigError):
+            ContinuousCapture(instrument, function="dcv").run()
+
     def test_accepts_correct_config(self, make_fake_instrument):
         instrument = make_fake_instrument([1.0], function="CURR", adc_rate="FAST", range_auto=False)
         capture = ContinuousCapture(instrument)
