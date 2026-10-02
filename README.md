@@ -229,7 +229,7 @@ The version lives in `version.py` and nowhere else: `hmc.exe --version` prints i
 ```bat
 pip install -r requirements.txt nuitka
 python -m pytest -q
-python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial --include-data-dir=plot_assets=plot_assets --enable-plugin=pywebview --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" --file-version=2.1.0 --product-version=2.1.0 measure.py
+python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe --include-package=pyvisa --include-package=pyvisa_py --include-package=serial --include-data-dir=plot_assets=plot_assets --enable-plugin=pywebview --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite --noinclude-pytest-mode=nofollow --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" --file-version=2.1.0 --product-version=2.1.0 measure.py
 ```
 
 Use the version from `version.py` in `--file-version` and `--product-version`.
