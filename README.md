@@ -88,9 +88,11 @@ Diagnostic flags of a capture, off by default, in any combination and order:
 
 ## Contract with the host program
 
-**Files.** `result.txt` is written next to `hmc.exe`, so it must sit in a writable folder. A LAN connection needs nothing else; a COM (USB) connection needs the HMC8012 VCP driver.
+### Files
 
-**`result.txt`:**
+`result.txt` is written next to `hmc.exe`, so it must sit in a writable folder. A LAN connection needs nothing else; a COM (USB) connection needs the HMC8012 VCP driver.
+
+### `result.txt`
 
 - It is deleted when a command starts (except `--version`) and written in one step (temporary file, then rename) when it ends: while a command runs the file does not exist, and a file that exists is always complete.
 - Line 1 is the value (decimal point), `OK`, the ADC rate, or `ERR`.
@@ -107,7 +109,11 @@ Diagnostic flags of a capture, off by default, in any combination and order:
 | `input sanitization` | Invalid argument |
 | `unexpected` | Anything else; `[EXC]` has the details |
 
-**Timing.** Every command first pays the start-up of `hmc.exe` (the single-file executable unpacks itself; typically a few seconds, to be measured on the lab PC). A capture then takes the `--time` seconds (with `--auto`, until 3 s after the motor stops) plus the analysis (well under 0.1 s).
+### Timing
+
+Every command first waits for `hmc.exe` to start: the single-file executable unpacks itself, which typically takes a few seconds depending on the PC. A capture then takes the `--time` seconds (with `--auto`, until 3 s after the motor stops) plus the analysis (well under 0.1 s).
+
+### From VBA
 
 For an instantaneous reading, wait for the process to end, then read the file:
 
@@ -140,20 +146,24 @@ Loop
 - `result.txt` is written in one step, so once it exists it is complete: line 1 is the value or `ERR`.
 - Parse numbers with `Val()`, which always expects a decimal point. `CDbl` follows the Windows locale and expects a comma on Italian systems.
 
-**One capture, one movement.** The capture may start during the deltastep peaks, but it must end with the device idle: with `--time`, let the device stop before the capture ends; with `--auto`, the capture waits for it.
+### One movement per capture
+
+The capture may start during the deltastep peaks, but it must end with the device idle: with `--time`, let the device stop before the capture ends; with `--auto`, the capture waits for it.
 
 ## How the capture value is computed
 
-`result.txt` holds the **mean current of the movement**: what the device draws over the whole movement (acceleration, constant speed, braking), between two groups of deltastep peaks, in a capture shaped (idle), deltastep peaks, movement, deltastep peaks, idle. The code is `analyzer.py` (`analyze_waveform`):
+`result.txt` holds the mean current of the movement: what the device draws over the whole movement (acceleration, constant speed, braking), between two groups of deltastep peaks, in a capture shaped (idle), deltastep peaks, movement, deltastep peaks, idle. The code is `analyzer.py` (`analyze_waveform`):
 
-1. **Validate.** Timestamps must increase. NaN/inf readings and overflow sentinels (+/-9.9E37) are invalid; more than 20% invalid readings reject the capture.
-2. **Conversions.** The HMC8012 answers `READ?` with its latest conversion, so consecutive equal readings are one conversion (about 5 per second at SLOW).
-3. **Idle.** The capture must end with at least 0.25 s of steady current at the lowest steady level of the capture, that is the lowest level held for at least 0.25 s: a single conversion below idle, as right after a deltastep stroke, does not count.
-4. **Peaks.** Conversions above the midpoint between idle and the highest conversion are deltastep peaks; invalid readings count as peaks.
-5. **Movement.** Stretches of consecutive conversions above idle by more than two tolerances (max(2 mA, 2%) each) and below the peaks. The conversion that touches a peak at either end of a stretch averages the movement with the peak and is left out; acceleration and braking stay in. What remains must last at least 0.3 s, more than one SLOW conversion, and exactly one stretch may qualify.
-6. **Result.** The mean of the movement's conversions, each weighted by its duration.
+1. Validate. Timestamps must increase. NaN/inf readings and overflow sentinels (+/-9.9E37) are invalid; more than 20% invalid readings reject the capture.
+2. Conversions. The HMC8012 answers `READ?` with its latest conversion, so consecutive equal readings are one conversion (about 5 per second at SLOW).
+3. Idle. The capture must end with at least 0.25 s of steady current at the lowest steady level of the capture, that is the lowest level held for at least 0.25 s: a single conversion below idle, as right after a deltastep stroke, does not count.
+4. Peaks. Conversions above the midpoint between idle and the highest conversion are deltastep peaks; invalid readings count as peaks.
+5. Movement. Stretches of consecutive conversions above idle by more than two tolerances (max(2 mA, 2%) each) and below the peaks. The conversion that touches a peak at either end of a stretch averages the movement with the peak and is left out; acceleration and braking stay in. What remains must last at least 0.3 s, more than one SLOW conversion, and exactly one stretch may qualify.
+6. Result. The mean of the movement's conversions, each weighted by its duration.
 
-**Errors instead of wrong numbers.** When no trustworthy value exists, `result.txt` gets `ERR`:
+### Errors
+
+When no trustworthy value exists, `result.txt` gets `ERR`:
 
 | Error | Meaning | What to change |
 |-|-|-|
@@ -161,7 +171,7 @@ Loop
 | `SignalNotSettledError` | No movement of at least 0.3 s between idle and the peaks | For a movement of only 2-3 SLOW conversions use `--rate MED` |
 | `AmbiguousRunError` | More than one movement in the capture | One movement per capture |
 
-**Known limits.**
+### Known limits
 
 - A periodic load whose period divides the 200 ms SLOW conversion period can alias if the ADC aperture is shorter than the conversion period (not stated in the manual). Fast ripple (stepper steps, driver PWM) is averaged within each conversion.
 - At SLOW a movement of 0.6 s has 3 conversions and the two at its ends touch the peaks: of the four SLOW lab captures of motor 2, three give a value from one or two conversions and one ends in `ERR`. At MED all four give a value.
@@ -236,18 +246,18 @@ Docstrings in each module are the reference for arguments, returns and raised er
 
 `python -m pytest -q` runs the whole suite, including tests that wait for a connection timeout on an unreachable address.
 
-- The analyzer is tested against the lab captures (`tests/data/lab`: the real device at SLOW, MED and FAST), the physical simulation (`simulation.py`, `scenarios.py`: the same pattern at each ADC rate) and hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value.
+- The analyzer is tested against the lab captures (`tests/data/lab`: the real device at SLOW, MED and FAST), the physical simulation (`simulation.py`, `scenarios.py`: the same pattern at each ADC rate) and hand-built edge cases. The tests check that every capture gives the expected value within the tolerance, or an error.
 - The plot tests cover the page content and the live stream over a real loopback connection.
 - The live window can only be checked on a Windows PC: start a capture with `--live` and look at it.
 
 ### Design decisions
 
-- **Movement only.** The deltastep peaks are another consumer and idle is not the movement: only the level between them counts. Acceleration and braking are part of the movement; only the conversion touching each peak is left out, because it averages the movement with the peak.
-- **An error is better than a wrong number.** Every check (idle at the end, one movement, at least 0.3 s) rejects the capture with a reason instead of returning a value that may be wrong.
-- **SLOW by default, without side effects.** SLOW is the only rate with specified accuracy and averages the stepper ripple within each conversion; `--rate MED` trades that for twice the conversions on short movements. The capture restores the previous rate, so single readings keep their settings.
-- **One conversion, one value.** The HMC8012 answers `READ?` with its latest conversion, so polling faster than the ADC repeats values; the analysis merges them, so the result does not depend on the polling rate.
-- **Failed readings are kept as NaN and count as peaks.** A missing reading next to the movement is never taken for part of it.
-- **Diagnostic outputs never change the outcome.** Plot, live window and samples file get the readings and the outcome, also of a failed capture, but `result.txt` never waits for them or depends on them.
+- The deltastep peaks are another consumer and idle is not the movement, so only the level between them counts. Acceleration and braking are part of the movement; only the conversion touching each peak is left out, because it averages the movement with the peak.
+- Every check (idle at the end, one movement, at least 0.3 s) rejects the capture with a reason instead of returning a value that may be wrong.
+- Captures read at SLOW by default: it is the only rate with specified accuracy, and it averages the stepper ripple within each conversion. `--rate MED` gives up both for twice the conversions on short movements. The capture restores the previous rate, so single readings keep their settings.
+- The HMC8012 answers `READ?` with its latest conversion, so polling faster than the ADC repeats values; the analysis merges them, so the result does not depend on the polling rate.
+- Failed readings are kept as NaN and count as peaks, so a missing reading next to the movement is never taken for part of it.
+- Plot, live window and samples file get the readings and the outcome, also of a failed capture, but `result.txt` never waits for them or depends on them.
 
 ### Instrument notes
 

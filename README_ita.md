@@ -88,9 +88,11 @@ Opzioni di diagnostica della cattura, disattivate di default, combinabili tra lo
 
 ## Contratto con il programma host
 
-**File.** `result.txt` viene scritto nella cartella di `hmc.exe`, che quindi deve avere i permessi di scrittura. Il collegamento LAN non richiede altro; quello COM (USB) richiede il driver VCP dell'HMC8012.
+### File
 
-**`result.txt`:**
+`result.txt` viene scritto nella cartella di `hmc.exe`, che quindi deve avere i permessi di scrittura. Il collegamento LAN non richiede altro; quello COM (USB) richiede il driver VCP dell'HMC8012.
+
+### `result.txt`
 
 - Viene cancellato all'avvio di ogni comando (tranne `--version`) e scritto in un colpo solo alla fine (file temporaneo poi rinominato): mentre un comando è in corso il file non esiste, e se il file esiste è completo.
 - La riga 1 è il valore (punto decimale), `OK`, l'ADC rate oppure `ERR`.
@@ -107,7 +109,11 @@ Opzioni di diagnostica della cattura, disattivate di default, combinabili tra lo
 | `input sanitization` | Argomento non valido |
 | `unexpected` | Qualsiasi altro errore; i dettagli sono in `[EXC]` |
 
-**Tempi.** A ogni comando si aggiunge prima il tempo di avvio di `hmc.exe`: l'eseguibile è un file unico che all'avvio si scompatta, e ci mette di solito qualche secondo (da misurare sul PC del laboratorio). Una cattura dura poi i secondi indicati con `--time` (con `--auto`, fino a 3 s dopo l'arresto del motore), più l'analisi, che richiede molto meno di 0.1 s.
+### Tempi
+
+A ogni comando si aggiunge prima il tempo di avvio di `hmc.exe`: l'eseguibile è un file unico che all'avvio si scompatta, e di solito ci mette qualche secondo, a seconda del PC. Una cattura dura poi i secondi indicati con `--time` (con `--auto`, fino a 3 s dopo l'arresto del motore), più l'analisi, che richiede molto meno di 0.1 s.
+
+### Dalla macro VBA
 
 Per una lettura singola, aspettare che il processo termini e poi leggere il file:
 
@@ -140,20 +146,24 @@ Loop
 - `result.txt` viene scritto in un solo passaggio, quindi quando esiste è completo: la riga 1 è il valore oppure `ERR`.
 - Leggere i numeri con `Val()`, che usa sempre il punto decimale. `CDbl` segue le impostazioni di Windows e in italiano si aspetta la virgola.
 
-**Una cattura per ogni movimento.** La cattura può partire durante i picchi del deltastep, ma deve finire con il dispositivo a riposo: con `--time` il dispositivo deve fermarsi prima della fine della cattura; con `--auto` è la cattura ad aspettarlo.
+### Una cattura per ogni movimento
+
+La cattura può partire durante i picchi del deltastep, ma deve finire con il dispositivo a riposo: con `--time` il dispositivo deve fermarsi prima della fine della cattura; con `--auto` è la cattura ad aspettarlo.
 
 ## Come si calcola il valore della cattura
 
-`result.txt` contiene la **corrente media del movimento**: quella che il dispositivo assorbe lungo tutto il movimento (accelerazione, velocità costante, frenata), tra due gruppi di picchi del deltastep, in una cattura che segue la sequenza (riposo), picchi del deltastep, movimento, picchi del deltastep, riposo. Il codice è in `analyzer.py` (`analyze_waveform`):
+`result.txt` contiene la corrente media del movimento: quella che il dispositivo assorbe lungo tutto il movimento (accelerazione, velocità costante, frenata), tra due gruppi di picchi del deltastep, in una cattura che segue la sequenza (riposo), picchi del deltastep, movimento, picchi del deltastep, riposo. Il codice è in `analyzer.py` (`analyze_waveform`):
 
-1. **Validazione.** I timestamp devono essere crescenti. Le letture NaN/inf e i valori di overflow (+/-9.9E37) sono considerati non validi; se superano il 20% delle letture, la cattura viene scartata.
-2. **Conversioni.** L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi più letture uguali consecutive sono una sola conversione (circa 5 al secondo in SLOW).
-3. **Riposo.** La cattura deve finire con almeno 0.25 s di corrente stabile al livello stabile più basso della cattura, cioè il livello più basso mantenuto per almeno 0.25 s: una singola conversione sotto il riposo, come subito dopo un colpo del deltastep, non conta.
-4. **Picchi.** Le conversioni sopra la metà tra il riposo e la conversione più alta sono picchi del deltastep; le letture non valide contano come picchi.
-5. **Movimento.** I tratti di conversioni consecutive che superano il riposo di più di due tolleranze (max(2 mA, 2%) ciascuna) e restano sotto i picchi. A ciascun estremo del tratto, la conversione a contatto con un picco fa la media tra movimento e picco e viene esclusa; accelerazione e frenata restano dentro. Quello che resta deve durare almeno 0.3 s, cioè più di una conversione SLOW, e un solo tratto può soddisfare questa condizione.
-6. **Risultato.** La media delle conversioni del movimento, ciascuna pesata per la sua durata.
+1. Validazione. I timestamp devono essere crescenti. Le letture NaN/inf e i valori di overflow (+/-9.9E37) sono considerati non validi; se superano il 20% delle letture, la cattura viene scartata.
+2. Conversioni. L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi più letture uguali consecutive sono una sola conversione (circa 5 al secondo in SLOW).
+3. Riposo. La cattura deve finire con almeno 0.25 s di corrente stabile al livello stabile più basso della cattura, cioè il livello più basso mantenuto per almeno 0.25 s: una singola conversione sotto il riposo, come subito dopo un colpo del deltastep, non conta.
+4. Picchi. Le conversioni sopra la metà tra il riposo e la conversione più alta sono picchi del deltastep; le letture non valide contano come picchi.
+5. Movimento. I tratti di conversioni consecutive che superano il riposo di più di due tolleranze (max(2 mA, 2%) ciascuna) e restano sotto i picchi. A ciascun estremo del tratto, la conversione a contatto con un picco fa la media tra movimento e picco e viene esclusa; accelerazione e frenata restano dentro. Quello che resta deve durare almeno 0.3 s, cioè più di una conversione SLOW, e un solo tratto può soddisfare questa condizione.
+6. Risultato. La media delle conversioni del movimento, ciascuna pesata per la sua durata.
 
-**Un errore, mai un numero sbagliato.** Se non c'è un valore affidabile, in `result.txt` viene scritto `ERR`:
+### Errori
+
+Se non c'è un valore affidabile, in `result.txt` viene scritto `ERR`:
 
 | Errore | Significato | Cosa cambiare |
 |-|-|-|
@@ -161,7 +171,7 @@ Loop
 | `SignalNotSettledError` | Nessun movimento di almeno 0.3 s tra il riposo e i picchi | Per un movimento di sole 2-3 conversioni SLOW usare `--rate MED` |
 | `AmbiguousRunError` | Più di un movimento nella cattura | Un movimento per cattura |
 
-**Limiti noti.**
+### Limiti noti
 
 - Un carico periodico con periodo sottomultiplo dei 200 ms di conversione in SLOW può dare aliasing se l'apertura dell'ADC è più corta del periodo di conversione (non indicato nel manuale). Il ripple veloce (passi dello stepper, PWM del driver) si media dentro ogni conversione.
 - In SLOW un movimento di 0.6 s ha 3 conversioni e le due agli estremi toccano i picchi: delle quattro catture di laboratorio del motore 2 in SLOW, tre danno un valore ricavato da una o due conversioni e una dà `ERR`. In MED tutte e quattro danno un valore.
@@ -236,18 +246,18 @@ Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti
 
 `python -m pytest -q` esegue tutti i test, compresi quelli che attendono il timeout di connessione su un indirizzo irraggiungibile.
 
-- L'analyzer è verificato sulle catture di laboratorio (`tests/data/lab`: il dispositivo vero in SLOW, MED e FAST), sulla simulazione fisica (`simulation.py`, `scenarios.py`: la stessa sequenza a ogni ADC rate) e su casi limite costruiti a mano. La regola verificata dai test: una cattura restituisce il valore giusto oppure un errore esplicito, mai un valore sbagliato.
+- L'analyzer è verificato sulle catture di laboratorio (`tests/data/lab`: il dispositivo vero in SLOW, MED e FAST), sulla simulazione fisica (`simulation.py`, `scenarios.py`: la stessa sequenza a ogni ADC rate) e su casi limite costruiti a mano. I test verificano che ogni cattura dia il valore atteso entro la tolleranza, oppure un errore.
 - I test del grafico coprono il contenuto della pagina e l'invio live su una vera connessione locale.
 - La finestra live si può verificare solo su un PC Windows: avviare una cattura con `--live` e guardarla.
 
 ### Scelte di progetto
 
-- **Solo il movimento.** I picchi del deltastep sono un altro carico e il riposo non è il movimento: conta solo il livello che sta in mezzo. Accelerazione e frenata fanno parte del movimento; si esclude solo la conversione a contatto con ciascun picco, perché fa la media tra il movimento e il picco.
-- **Un errore piuttosto che un numero sbagliato.** Ogni controllo (riposo alla fine, un solo movimento, almeno 0.3 s) scarta la cattura indicando il motivo, invece di restituire un valore potenzialmente sbagliato.
-- **SLOW di default, senza effetti collaterali.** SLOW è l'unico rate con accuratezza specificata e media il ripple dello stepper dentro ogni conversione; `--rate MED` rinuncia a questo in cambio del doppio delle conversioni sui movimenti brevi. La cattura ripristina il rate precedente, così le letture singole successive mantengono le loro impostazioni.
-- **Una conversione, un valore.** L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi se lo si interroga più velocemente dell'ADC i valori si ripetono; l'analisi li unisce, così il risultato non dipende dalla frequenza di interrogazione.
-- **Le letture fallite restano nei dati come NaN e contano come picchi.** Una lettura mancante accanto al movimento non viene mai presa per una sua parte.
-- **La diagnostica non cambia mai l'esito.** Grafico, finestra live e file delle letture ricevono letture ed esito anche quando la cattura fallisce, ma `result.txt` non li aspetta e non dipende da loro.
+- I picchi del deltastep sono un altro carico e il riposo non è il movimento, quindi conta solo il livello che sta in mezzo. Accelerazione e frenata fanno parte del movimento; si esclude solo la conversione a contatto con ciascun picco, perché fa la media tra il movimento e il picco.
+- Ogni controllo (riposo alla fine, un solo movimento, almeno 0.3 s) scarta la cattura indicando il motivo, invece di restituire un valore potenzialmente sbagliato.
+- Le catture leggono in SLOW di default: è l'unico rate con accuratezza specificata e media il ripple dello stepper dentro ogni conversione. `--rate MED` rinuncia a entrambe le cose in cambio del doppio delle conversioni sui movimenti brevi. La cattura ripristina il rate precedente, così le letture singole successive mantengono le loro impostazioni.
+- L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi se lo si interroga più velocemente dell'ADC i valori si ripetono; l'analisi li unisce, così il risultato non dipende dalla frequenza di interrogazione.
+- Le letture fallite restano nei dati come NaN e contano come picchi, così una lettura mancante accanto al movimento non viene mai presa per una sua parte.
+- Grafico, finestra live e file delle letture ricevono letture ed esito anche quando la cattura fallisce, ma `result.txt` non li aspetta e non dipende da loro.
 
 ### Note sullo strumento
 
