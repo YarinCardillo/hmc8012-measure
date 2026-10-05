@@ -67,11 +67,11 @@ def test_a_movement_longer_than_the_hold_does_not_stop_a_capture_started_during_
 
 def test_stops_the_lab_capture_that_starts_during_the_deltastep() -> None:
     # Recorded for 30 s; its last deltastep conversion is held until 7.03 s.
-    assert 9.9 <= _stop_time(zip(*load_lab_capture("2026-10-02_16-23-08_motor1"))) <= 10.2
+    assert 9.9 <= _stop_time(zip(*load_lab_capture("2026-10-02_16-23-08_motor1_slow"))) <= 10.2
 
 
 def test_an_auto_stopped_capture_gives_the_same_value_as_a_full_one() -> None:
-    timestamps, values = load_lab_capture("2026-10-02_16-23-08_motor1")
+    timestamps, values = load_lab_capture("2026-10-02_16-23-08_motor1_slow")
     stop = _stop_time(zip(timestamps, values))
     kept = timestamps <= stop
     stopped = analyze_waveform(timestamps[kept], values[kept])

@@ -52,7 +52,7 @@ On Windows, activate the environment with `venv\Scripts\activate`.
 - Captures work for `dci`, `dcv`, `aci` and `acv`; the analysis is designed for the DC supply current of the device (`dci`), see [How the capture value is computed](#how-the-capture-value-is-computed).
 - With `--auto`, the capture stops 3 s after the value is back at idle, provided the device ran for at least 0.5 s first. Idle is the lowest reading so far, so the capture may start while the device is already moving. Pauses shorter than 3 s do not stop it. If the device never stops, the capture ends at 30 s.
 - `--timeout S` sets the capture deadline; it defaults to the capture length plus 10 s (40 s with `--auto`).
-- The capture reads at the SLOW ADC rate, or at the rate given with `--rate SLOW|MED|FAST`. If the instrument is at another rate, capture switches to it and restores the previous rate at the end, also when it fails, so later measurements keep their settings. MED (10 conversions per second) suits movements that last only a few SLOW conversions.
+- The capture reads at the SLOW ADC rate, or at the rate given with `--rate SLOW|MED|FAST`. If the instrument is at another rate, capture switches to it and restores the previous rate at the end, also when it fails, so later measurements keep their settings. MED (10 conversions per second) suits movements that last only a few SLOW conversions. FAST gives no more conversions than MED (see [Instrument notes](#instrument-notes)), only more noise.
 - Set the range of the function with `range` first: capture refuses auto-range.
 
 Diagnostic flags of a capture, off by default, in any combination and order:
@@ -144,28 +144,28 @@ Loop
 
 ## How the capture value is computed
 
-`result.txt` holds the **mean current of the movement**: the level the device draws while moving, between two groups of deltastep peaks, in a capture shaped (idle), deltastep peaks, movement, deltastep peaks, idle. The code is `analyzer.py` (`analyze_waveform`):
+`result.txt` holds the **mean current of the movement**: what the device draws over the whole movement (acceleration, constant speed, braking), between two groups of deltastep peaks, in a capture shaped (idle), deltastep peaks, movement, deltastep peaks, idle. The code is `analyzer.py` (`analyze_waveform`):
 
 1. **Validate.** Timestamps must increase. NaN/inf readings and overflow sentinels (+/-9.9E37) are invalid; more than 20% invalid readings reject the capture.
 2. **Conversions.** The HMC8012 answers `READ?` with its latest conversion, so consecutive equal readings are one conversion (about 5 per second at SLOW).
-3. **Idle.** The capture must end with at least 0.25 s of steady current at the lowest level of the capture.
+3. **Idle.** The capture must end with at least 0.25 s of steady current at the lowest steady level of the capture, that is the lowest level held for at least 0.25 s: a single conversion below idle, as right after a deltastep stroke, does not count.
 4. **Peaks.** Conversions above the midpoint between idle and the highest conversion are deltastep peaks; invalid readings count as peaks.
-5. **Movement.** Stretches of consecutive conversions above idle by more than two tolerances and below the peaks. At each end of a stretch, the conversions that do not match its level (within the tolerance, max(2 mA, 2%)) straddle the movement's start or stop and are left out. What remains must last at least 0.3 s, more than one SLOW conversion, and exactly one stretch may qualify.
-6. **Result.** The mean of the movement's conversions, if two standard errors are within the tolerance.
+5. **Movement.** Stretches of consecutive conversions above idle by more than two tolerances (max(2 mA, 2%) each) and below the peaks. The conversion that touches a peak at either end of a stretch averages the movement with the peak and is left out; acceleration and braking stay in. What remains must last at least 0.3 s, more than one SLOW conversion, and exactly one stretch may qualify.
+6. **Result.** The mean of the movement's conversions, each weighted by its duration.
 
 **Errors instead of wrong numbers.** When no trustworthy value exists, `result.txt` gets `ERR`:
 
 | Error | Meaning | What to change |
 |-|-|-|
-| `InvalidCaptureError` | Malformed data, too many invalid readings, or the capture does not end with steady idle at its lowest level | Let the capture run until the device is idle (`--auto` does); raise the range if the peaks overflow |
+| `InvalidCaptureError` | Malformed data, too many invalid readings, or the capture does not end with steady idle at its lowest steady level | Let the capture run until the device is idle (`--auto` does); raise the range if the peaks overflow |
 | `SignalNotSettledError` | No movement of at least 0.3 s between idle and the peaks | For a movement of only 2-3 SLOW conversions use `--rate MED` |
 | `AmbiguousRunError` | More than one movement in the capture | One movement per capture |
-| `ImpreciseValueError` | Movement found, but its conversions scatter too much for its mean (few conversions, edges mixed with the peaks) | `--rate MED` for short movements |
 
 **Known limits.**
 
 - A periodic load whose period divides the 200 ms SLOW conversion period can alias if the ADC aperture is shorter than the conversion period (not stated in the manual). Fast ripple (stepper steps, driver PWM) is averaged within each conversion.
-- At SLOW a movement of 0.6 s has 3 conversions, and the ones at its ends mix with the peaks: of the four lab captures of motor 2, one gives a value and three end in `ERR`. `--rate MED` doubles the conversions.
+- At SLOW a movement of 0.6 s has 3 conversions and the two at its ends touch the peaks: of the four SLOW lab captures of motor 2, three give a value from one or two conversions and one ends in `ERR`. At MED all four give a value.
+- The value depends on the ADC rate. At SLOW the acceleration and braking fall mostly in the conversions that touch the peaks, which are left out: motor 1 reads about 190 mA at SLOW and 192 mA at MED. Measure each motor always at the same rate.
 - The deltastep peaks must be in the capture: they set the upper limit of the movement. Without them the movement itself counts as peaks and the capture ends in `SignalNotSettledError`.
 - A movement less than two tolerances above idle (about 7 mA at 167 mA) is not told apart from idle.
 - A pause inside the movement (current back at idle) splits it in two: if both parts last at least 0.3 s, the capture ends in `AmbiguousRunError`. With `--auto`, a pause of 3 s or more also ends the capture.
@@ -236,14 +236,14 @@ Docstrings in each module are the reference for arguments, returns and raised er
 
 `python -m pytest -q` runs the whole suite, including tests that wait for a connection timeout on an unreachable address.
 
-- The analyzer is tested against the lab captures (`tests/data/lab`: the real device at SLOW), the physical simulation (`simulation.py`, `scenarios.py`: the same pattern at each ADC rate) and hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value.
+- The analyzer is tested against the lab captures (`tests/data/lab`: the real device at SLOW, MED and FAST), the physical simulation (`simulation.py`, `scenarios.py`: the same pattern at each ADC rate) and hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value.
 - The plot tests cover the page content and the live stream over a real loopback connection.
 - The live window can only be checked on a Windows PC: start a capture with `--live` and look at it.
 
 ### Design decisions
 
-- **Movement only.** The deltastep peaks are another consumer and idle is not the movement: only the level between them counts. The conversions at the movement's ends are left out because each one averages the movement with what came before or after it.
-- **An error is better than a wrong number.** Every check (idle at the end, one movement, at least 0.3 s, precision) rejects the capture with a reason instead of returning a value that may be wrong.
+- **Movement only.** The deltastep peaks are another consumer and idle is not the movement: only the level between them counts. Acceleration and braking are part of the movement; only the conversion touching each peak is left out, because it averages the movement with the peak.
+- **An error is better than a wrong number.** Every check (idle at the end, one movement, at least 0.3 s) rejects the capture with a reason instead of returning a value that may be wrong.
 - **SLOW by default, without side effects.** SLOW is the only rate with specified accuracy and averages the stepper ripple within each conversion; `--rate MED` trades that for twice the conversions on short movements. The capture restores the previous rate, so single readings keep their settings.
 - **One conversion, one value.** The HMC8012 answers `READ?` with its latest conversion, so polling faster than the ADC repeats values; the analysis merges them, so the result does not depend on the polling rate.
 - **Failed readings are kept as NaN and count as peaks.** A missing reading next to the movement is never taken for part of it.
@@ -256,6 +256,12 @@ From the HMC8012 user and SCPI manuals:
 - DC current gives 5 / 10 / 200 readings per second at SLOW / MED / FAST, with 5¾ / 4¾ / 4¾ digits.
 - Accuracy is specified at SLOW only, and `*RST` sets SLOW.
 - `ADCRate` "selects the ADC rate for the activated measurement function".
+
+Measured on the lab device by polling `READ?` (5 October 2026):
+
+- new values arrive about 5 times per second at SLOW, 10 at MED and 10.5 at FAST, not 200 at FAST;
+- FAST is the noisiest: at idle the readings scatter by about 0.8 mA, against at most 0.5 mA at MED and 0.02 mA at SLOW;
+- right after a deltastep stroke the current can drop for one conversion up to about 5 mA below idle.
 
 Not stated in the manuals, to verify on the instrument:
 
@@ -277,7 +283,7 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
   --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
   --noinclude-pytest-mode=nofollow ^
   --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
-  --file-version=4.1.0 --product-version=4.1.0 ^
+  --file-version=4.2.0 --product-version=4.2.0 ^
   measure.py
 ```
 

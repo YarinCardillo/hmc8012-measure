@@ -1,7 +1,8 @@
 """Lab captures of the real device (tests/data/lab), as test inputs.
 
 Each file is a capture in the --save-samples CSV format, gzipped: the
-device's deltastep peaks around one movement, read at the SLOW ADC rate.
+device's deltastep peaks around one movement of motor 1 or motor 2. The
+file name ends with the motor and the ADC rate (slow, med, fast).
 """
 
 from pathlib import Path

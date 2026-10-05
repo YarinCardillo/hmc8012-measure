@@ -80,8 +80,8 @@ VALUE_FLAGS = (DELAY_FLAG, TIME_FLAG, TIMEOUT_FLAG, RATE_FLAG)
 SWITCH_FLAGS = (AUTO_FLAG, SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
 CAPTURE_ONLY_FLAGS = (TIMEOUT_FLAG, RATE_FLAG, SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
 VALID_ADC_RATES = ("SLOW", "MED", "FAST")
-# Default ADC rate of captures: the only rate with specified accuracy. --rate MED or FAST resolves
-# movements of only a few SLOW conversions.
+# Default ADC rate of captures: the only rate with specified accuracy. --rate MED resolves movements
+# of only a few SLOW conversions; FAST gives no more conversions through READ? on the lab device.
 CAPTURE_ADC_RATE = "SLOW"
 VALID_FUNCTIONS = sorted(HMC8012.VALID_FUNCTIONS)
 VALID_RANGE_FUNCTIONS = sorted(HMC8012.RANGE_SCPI_MAP.keys())
