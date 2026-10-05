@@ -12,15 +12,16 @@ Pipeline:
     2. Conversions: the instrument answers READ? with its last conversion, so
        consecutive equal readings are one conversion.
     3. Idle: the steady level at the end of the capture. It must be the
-       lowest level of the capture (the device returns to idle).
+       lowest steady level of the capture (the device returns to idle); a
+       single conversion below it, as right after a deltastep stroke, is not.
     4. Peaks: conversions above the midpoint between idle and the highest
        conversion; invalid readings count as peaks.
     5. Movement: stretches of consecutive conversions between idle (plus two
-       tolerances) and the peaks. The edge conversions that do not match a
-       stretch's level straddle its start or stop and are left out. Exactly
-       one stretch may last at least MIN_MOVEMENT_S.
-    6. Report the mean of the movement's conversions, if it is known within
-       tolerance at two standard errors.
+       tolerances) and the peaks. The conversion that touches a peak at
+       either end averages the movement with the peak and is left out;
+       acceleration and braking stay in. Exactly one stretch may last at
+       least MIN_MOVEMENT_S.
+    6. Report the time-weighted mean of the movement's conversions.
 """
 
 import logging
@@ -37,8 +38,6 @@ OVERFLOW_SENTINEL = 9.90000000e37
 RUN_THRESHOLD_TOLERANCES = 2.0
 # Peaks start at this fraction of the way from idle to the highest conversion.
 PEAK_THRESHOLD_FRACTION = 0.5
-# The reported mean must be known within the tolerance at this many sigma.
-PRECISION_Z_SCORE = 2.0
 # Steady idle required at the end of the capture.
 MIN_IDLE_S = 0.25
 # Shortest movement, edges left out: longer than one SLOW conversion (about 0.2 s).
@@ -121,10 +120,6 @@ class InvalidCaptureError(AnalysisError):
     """Raised when the capture arrays are malformed, mostly invalid, or not idle at the end."""
 
 
-class ImpreciseValueError(AnalysisError):
-    """Raised when the movement mean is not known within tolerance (too few or too scattered conversions)."""
-
-
 @dataclass(frozen=True)
 class _Conversions:
     """Consecutive equal readings merged into conversions; invalid readings are +inf."""
@@ -156,13 +151,12 @@ def analyze_waveform(
             steady idle at capture end.
         SignalNotSettledError: No movement of at least MIN_MOVEMENT_S.
         AmbiguousRunError: More than one movement.
-        ImpreciseValueError: The movement mean is not known within tolerance.
     """
     times, currents, is_valid = _checked_arrays(timestamps, values, config)
     conversions = _conversions(times, currents, is_valid)
     idle_level = _idle_level(times, currents, is_valid, conversions, config)
     run, movement = _movement(conversions, idle_level, config)
-    return _result(times, conversions, run, movement, idle_level, config)
+    return _result(times, conversions, run, movement, idle_level)
 
 
 def _checked_arrays(
@@ -218,7 +212,7 @@ def _idle_level(
     conversions: _Conversions,
     config: AnalysisConfig,
 ) -> float:
-    """Level of the steady idle that must end the capture, the lowest level of the capture."""
+    """Level of the steady idle that must end the capture, the lowest steady level of the capture."""
     start = len(conversions.values) - 1
     low = high = conversions.values[start]
     while start > 0 and _fits_band(min(low, conversions.values[start - 1]), max(high, conversions.values[start - 1]), config):
@@ -227,14 +221,25 @@ def _idle_level(
     first_sample = conversions.first_sample[start]
     duration = times[-1] - times[first_sample]
     idle = float(np.mean(currents[first_sample:][is_valid[first_sample:]])) if math.isfinite(high) else math.inf
-    lowest = float(np.min(conversions.values))
+    lowest = _lowest_steady_level(conversions)
     if duration < MIN_IDLE_S or idle - lowest > config.tolerance(lowest):
         raise InvalidCaptureError(
-            f"Capture must end with the device idle: need {MIN_IDLE_S} s of steady current at the lowest level "
-            f"of the capture ({lowest:.4f} A), got {max(duration, 0.0):.2f} s at {idle:.4f} A. "
+            f"Capture must end with the device idle: need {MIN_IDLE_S} s of steady current at the lowest steady "
+            f"level of the capture ({lowest:.4f} A), got {max(duration, 0.0):.2f} s at {idle:.4f} A. "
             "Let the capture run until the device is back at idle (--auto does)."
         )
     return idle
+
+
+def _lowest_steady_level(conversions: _Conversions) -> float:
+    """Lowest level held for at least MIN_IDLE_S: a dip of a single conversion is not a level."""
+    lowest = math.inf
+    for first in range(len(conversions.values)):
+        last = int(np.searchsorted(conversions.end_time, conversions.times[first] + MIN_IDLE_S))
+        if last == len(conversions.values):
+            break
+        lowest = min(lowest, float(np.max(conversions.values[first:last + 1])))
+    return lowest
 
 
 def _fits_band(low: float, high: float, config: AnalysisConfig) -> bool:
@@ -253,8 +258,8 @@ def _movement(
     is_candidate = (conversions.values > floor) & (conversions.values < ceiling)
     movements = []
     for run in _stretches(is_candidate):
-        kept = _trimmed(conversions, run, config)
-        if conversions.end_time[kept[1] - 1] - conversions.times[kept[0]] >= MIN_MOVEMENT_S:
+        kept = _without_peak_edges(conversions.values, run, ceiling)
+        if kept[1] > kept[0] and conversions.end_time[kept[1] - 1] - conversions.times[kept[0]] >= MIN_MOVEMENT_S:
             movements.append((run, kept))
     if not movements:
         raise SignalNotSettledError(
@@ -274,28 +279,14 @@ def _stretches(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(edges[::2].tolist(), edges[1::2].tolist()))
 
 
-def _trimmed(conversions: _Conversions, run: tuple[int, int], config: AnalysisConfig) -> tuple[int, int]:
-    """Drop edge conversions off the stretch's level: they straddle its start or stop."""
+def _without_peak_edges(values: np.ndarray, run: tuple[int, int], ceiling: float) -> tuple[int, int]:
+    """Drop the conversion at either end that touches a peak: it averages the movement with the peak."""
     start, end = run
-    while end - start > 1:
-        level = _weighted_median(conversions, start, end)
-        deviations = [abs(conversions.values[start] - level), abs(conversions.values[end - 1] - level)]
-        if max(deviations) <= config.tolerance(level):
-            break
-        if deviations[0] >= deviations[1]:
-            start += 1
-        else:
-            end -= 1
+    if start > 0 and values[start - 1] >= ceiling:
+        start += 1
+    if end < len(values) and values[end] >= ceiling:
+        end -= 1
     return start, end
-
-
-def _weighted_median(conversions: _Conversions, start: int, end: int) -> float:
-    """Median of the conversion values, each weighted by its duration."""
-    values = conversions.values[start:end]
-    durations = conversions.end_time[start:end] - conversions.times[start:end]
-    order = np.argsort(values, kind="stable")
-    cumulative = np.cumsum(durations[order])
-    return float(values[order][np.searchsorted(cumulative, cumulative[-1] / 2.0)])
 
 
 def _result(
@@ -304,20 +295,13 @@ def _result(
     run: tuple[int, int],
     movement: tuple[int, int],
     idle_level: float,
-    config: AnalysisConfig,
 ) -> AnalysisResult:
-    """Mean and precision of the movement's conversions."""
+    """Time-weighted mean of the movement's conversions: a merged pair of equal conversions counts twice."""
     first, last = movement
     readings = conversions.values[first:last]
-    mean = float(np.mean(readings))
+    durations = conversions.end_time[first:last] - conversions.times[first:last]
+    mean = float(np.average(readings, weights=durations))
     standard_error = float(np.std(readings, ddof=1)) / math.sqrt(len(readings)) if len(readings) > 1 else 0.0
-    if PRECISION_Z_SCORE * standard_error > config.tolerance(mean):
-        raise ImpreciseValueError(
-            f"Movement {conversions.times[first]:.2f}-{conversions.end_time[last - 1]:.2f} s is too scattered: "
-            f"{len(readings)} conversions, mean {mean:.4f} A +/-{PRECISION_Z_SCORE * standard_error * 1000:.1f} mA "
-            f"({PRECISION_Z_SCORE:g} sigma), tolerance {config.rel_tolerance:.0%}. "
-            "A short movement needs a faster ADC rate (--rate MED)."
-        )
     return AnalysisResult(
         stable_value=mean,
         stable_std_dev=float(np.std(readings)),
