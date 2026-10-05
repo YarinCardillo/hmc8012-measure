@@ -38,7 +38,7 @@ Su Windows l'ambiente si attiva con `venv\Scripts\activate`.
 
 | Comando | Cosa fa | `result.txt` |
 |-|-|-|
-| `<indirizzo> <funzione> [--delay S]` | Una lettura con le impostazioni correnti, dopo un'attesa opzionale di S secondi | valore o `ERR` |
+| `<indirizzo> <funzione> [--delay S]` | Una lettura con le impostazioni correnti, dopo un'attesa opzionale di S secondi; un overflow viene riletto una volta dopo 0.3 s (vedi [Note sullo strumento](#note-sullo-strumento)) | valore o `ERR` |
 | `<indirizzo> <funzione> --time S [opzioni]` | Cattura di S secondi; restituisce il valore medio del movimento. Vedi [Cattura](#cattura) | valore o `ERR` |
 | `<indirizzo> <funzione> --auto [opzioni]` | Cattura che si ferma da sola quando il motore torna a riposo (al massimo 30 s). Vedi [Cattura](#cattura) | valore o `ERR` |
 | `<indirizzo> range <funzione> <valore>` | Seleziona la funzione e il fondo scala; restano fino al prossimo `range` o `reset` | `OK` o `ERR` |
@@ -266,6 +266,7 @@ Dai manuali utente e SCPI dell'HMC8012:
 - La corrente DC dà 5 / 10 / 200 letture al secondo in SLOW / MED / FAST, con 5¾ / 4¾ / 4¾ cifre.
 - L'accuratezza è specificata solo in SLOW, e `*RST` imposta SLOW.
 - `ADCRate` "selects the ADC rate for the activated measurement function".
+- `READ?` restituisce l'ultima conversione, che può precedere la richiesta fino a una conversione (200 ms in SLOW). Per questo una lettura singola che risponde con il valore di overflow viene ripetuta una volta dopo 0.3 s, e solo un overflow anche alla seconda lettura dà `ERR`.
 
 Misurati sul dispositivo del laboratorio interrogando `READ?` (5 ottobre 2026):
 
@@ -293,7 +294,7 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
   --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
   --noinclude-pytest-mode=nofollow ^
   --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
-  --file-version=4.2.0 --product-version=4.2.0 ^
+  --file-version=4.2.1 --product-version=4.2.1 ^
   measure.py
 ```
 

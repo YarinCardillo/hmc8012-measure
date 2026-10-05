@@ -38,7 +38,7 @@ On Windows, activate the environment with `venv\Scripts\activate`.
 
 | Command | What it does | `result.txt` |
 |-|-|-|
-| `<address> <function> [--delay S]` | One reading with the current settings, after an optional wait of S seconds | value or `ERR` |
+| `<address> <function> [--delay S]` | One reading with the current settings, after an optional wait of S seconds; an overflow is read again once after 0.3 s (see [Instrument notes](#instrument-notes)) | value or `ERR` |
 | `<address> <function> --time S [flags]` | Capture of S seconds; reports the mean movement value. See [Capture](#capture) | value or `ERR` |
 | `<address> <function> --auto [flags]` | Capture that stops by itself once the motor is back at idle (at most 30 s). See [Capture](#capture) | value or `ERR` |
 | `<address> range <function> <value>` | Selects the function and its range; kept until the next `range` or `reset` | `OK` or `ERR` |
@@ -266,6 +266,7 @@ From the HMC8012 user and SCPI manuals:
 - DC current gives 5 / 10 / 200 readings per second at SLOW / MED / FAST, with 5¾ / 4¾ / 4¾ digits.
 - Accuracy is specified at SLOW only, and `*RST` sets SLOW.
 - `ADCRate` "selects the ADC rate for the activated measurement function".
+- `READ?` returns the latest conversion, which can predate the query by up to one conversion (200 ms at SLOW). A single reading that returns the overflow sentinel is therefore read again once after 0.3 s, and only an overflow on both readings gives `ERR`.
 
 Measured on the lab device by polling `READ?` (5 October 2026):
 
@@ -293,7 +294,7 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
   --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
   --noinclude-pytest-mode=nofollow ^
   --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
-  --file-version=4.2.0 --product-version=4.2.0 ^
+  --file-version=4.2.1 --product-version=4.2.1 ^
   measure.py
 ```
 
