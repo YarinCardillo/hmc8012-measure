@@ -175,19 +175,18 @@ Loop
 
 ### Architecture
 
-```mermaid
-flowchart LR
-    CLI["measure.py<br/>CLI, result.txt"] --> DRV["hmc8012.py<br/>SCPI driver"]
-    CLI --> CAP["capture.py<br/>polling loop"]
-    CAP --> DRV
-    CLI --> ANA["analyzer.py<br/>movement mean"]
-    CLI --> PLOT["capture_plot.py<br/>plot page (uPlot)"]
-    CLI --> LIVE["live_plot.py<br/>live page server"]
-    LIVE --> PLOT
-    CLI --> WIN["live_window.py<br/>native window process"]
-    CLI --> STOP["stop_detector.py<br/>auto-stop"]
-    SIM["simulation.py + scenarios.py<br/>physical test bench"] -.-> TESTS["tests/"]
-    TESTS -.-> ANA
+```text
+measure.py              CLI, result.txt
+ |-- hmc8012.py         SCPI driver
+ |-- capture.py         polling loop, reads through hmc8012.py
+ |-- stop_detector.py   auto-stop (--auto)
+ |-- analyzer.py        movement mean
+ |-- capture_plot.py    plot page (uPlot)
+ |-- live_plot.py       live page server, uses capture_plot.py
+ `-- live_window.py     native window process
+
+tests/                  lab captures (tests/data/lab) and the simulator
+                        (simulation.py, scenarios.py) check analyzer.py
 ```
 
 What a capture (`--time` or `--auto`) does:
@@ -239,7 +238,7 @@ Docstrings in each module are the reference for arguments, returns and raised er
 
 - The analyzer is tested against the lab captures (`tests/data/lab`: the real device at SLOW), the physical simulation (`simulation.py`, `scenarios.py`: the same pattern at each ADC rate) and hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value.
 - The plot tests cover the page content and the live stream over a real loopback connection.
-- The CI build checks that the compiled live window process starts a WebView2 window. How the window looks can only be checked on a Windows PC.
+- The live window can only be checked on a Windows PC: start a capture with `--live` and look at it.
 
 ### Design decisions
 
@@ -267,20 +266,7 @@ Not stated in the manuals, to verify on the instrument:
 
 The version lives in `version.py` and nowhere else: `hmc.exe --version` prints it and the build writes it into the executable's file properties. Every shipped change bumps it (semantic versioning: major for a changed host contract, minor for new commands, patch for fixes).
 
-### From GitHub
-
-Every push to `master` runs `.github/workflows/build-windows.yml` on a Windows runner:
-
-1. Python 3.12 and the test suite.
-2. The Nuitka build.
-3. A smoke test: the version on the command line and in the file properties must match `version.py`, an invalid command must give `ERR`, the build report must list the plot assets, and the live window process must stay up with a WebView2 window.
-4. The upload of `hmc.exe` as the artifact `hmc-exe-v<version>-<commit>`, on the run page under the Actions tab.
-
-It can also be started by hand from the Actions tab (Run workflow).
-
-### On Windows
-
-With Python 3.12 (Nuitka's bundled MinGW-w64 does not support 3.13+):
+`hmc.exe` is built on Windows with Python 3.12 (Nuitka's bundled MinGW-w64 does not support 3.13+):
 
 ```bat
 pip install -r requirements.txt nuitka

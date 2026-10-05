@@ -175,19 +175,18 @@ Loop
 
 ### Architettura
 
-```mermaid
-flowchart LR
-    CLI["measure.py<br/>CLI, result.txt"] --> DRV["hmc8012.py<br/>driver SCPI"]
-    CLI --> CAP["capture.py<br/>loop di lettura"]
-    CAP --> DRV
-    CLI --> ANA["analyzer.py<br/>media del movimento"]
-    CLI --> PLOT["capture_plot.py<br/>pagina del grafico (uPlot)"]
-    CLI --> LIVE["live_plot.py<br/>server della pagina live"]
-    LIVE --> PLOT
-    CLI --> WIN["live_window.py<br/>processo della finestra nativa"]
-    CLI --> STOP["stop_detector.py<br/>stop automatico"]
-    SIM["simulation.py + scenarios.py<br/>simulatore fisico"] -.-> TESTS["tests/"]
-    TESTS -.-> ANA
+```text
+measure.py              CLI, result.txt
+ |-- hmc8012.py         driver SCPI
+ |-- capture.py         ciclo di lettura, tramite hmc8012.py
+ |-- stop_detector.py   stop automatico (--auto)
+ |-- analyzer.py        media del movimento
+ |-- capture_plot.py    pagina del grafico (uPlot)
+ |-- live_plot.py       server della pagina live, usa capture_plot.py
+ `-- live_window.py     processo della finestra nativa
+
+tests/                  catture di laboratorio (tests/data/lab) e simulatore
+                        (simulation.py, scenarios.py) per verificare analyzer.py
 ```
 
 Cosa fa una cattura (`--time` o `--auto`):
@@ -239,7 +238,7 @@ Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti
 
 - L'analyzer è verificato sulle catture di laboratorio (`tests/data/lab`: il dispositivo vero in SLOW), sulla simulazione fisica (`simulation.py`, `scenarios.py`: la stessa sequenza a ogni ADC rate) e su casi limite costruiti a mano. La regola verificata dai test: una cattura restituisce il valore giusto oppure un errore esplicito, mai un valore sbagliato.
 - I test del grafico coprono il contenuto della pagina e l'invio live su una vera connessione locale.
-- La CI verifica che, nell'eseguibile compilato, il processo della finestra live apra una finestra WebView2. L'aspetto della finestra si può verificare solo su un PC Windows.
+- La finestra live si può verificare solo su un PC Windows: avviare una cattura con `--live` e guardarla.
 
 ### Scelte di progetto
 
@@ -267,20 +266,7 @@ Non indicati nei manuali, da verificare sullo strumento:
 
 La versione è definita solo in `version.py`: `hmc.exe --version` la stampa e la build la scrive nelle proprietà del file eseguibile. Ogni modifica rilasciata la incrementa (versionamento semantico: major quando cambia il contratto con l'host, minor per nuovi comandi, patch per le correzioni).
 
-### Da GitHub
-
-Ogni push su `master` esegue `.github/workflows/build-windows.yml` su un runner Windows:
-
-1. Installazione di Python 3.12 ed esecuzione dei test.
-2. La compilazione con Nuitka.
-3. Uno smoke test: la versione stampata da riga di comando e quella nelle proprietà del file devono coincidere con `version.py`, un comando non valido deve dare `ERR`, il report di compilazione deve elencare i file del grafico, e il processo della finestra live deve restare attivo con una finestra WebView2.
-4. Il caricamento di `hmc.exe` come artifact `hmc-exe-v<versione>-<commit>`, scaricabile dalla pagina della run nella scheda Actions.
-
-Il workflow si può anche avviare a mano dalla scheda Actions (Run workflow).
-
-### Su Windows
-
-Con Python 3.12 (il MinGW-w64 incluso in Nuitka non supporta la 3.13+):
+`hmc.exe` si compila su Windows con Python 3.12 (il MinGW-w64 incluso in Nuitka non supporta la 3.13+):
 
 ```bat
 pip install -r requirements.txt nuitka
