@@ -6,9 +6,16 @@ invocations. Use reset() explicitly to restore factory defaults.
 """
 
 import logging
+import time
+
 import pyvisa
 
 logger = logging.getLogger(__name__)
+
+# Wait before reading again after an overflow: longer than one SLOW conversion (200 ms).
+OVERFLOW_RETRY_WAIT_S = 0.3
+# Read timeout while discarding stale replies at connection.
+STALE_REPLY_TIMEOUT_MS = 100
 
 
 class ScpiError(Exception):
@@ -74,7 +81,7 @@ class HMC8012:
         return False
 
     def connect(self) -> None:
-        """Open VISA connection, clear errors, enable remote mode.
+        """Open VISA connection, discard stale replies, clear errors, enable remote mode.
 
         Does NOT reset the instrument, call reset() explicitly to restore
         factory defaults. This preserves any previously configured function
@@ -90,25 +97,36 @@ class HMC8012:
             self._instrument.write_termination = "\n"
             self._instrument.timeout = self._timeout_ms
 
+            self._discard_pending_replies()
             self._write("*CLS")
             self._drain_error_queue()
             self._write("INIT")
             self._write("SYSTem:REMote")
             identity = self._query("*IDN?")
             logger.info("Connected: %s", identity)
-        except Exception:
+        except BaseException:
             self._cleanup_resources()
             raise
 
     def close(self) -> None:
-        """Drain error queue, restore local control, close connection."""
+        """Drain error queue, restore local control, close connection; never raises.
+
+        A failure here comes after the command's work is done, so it is logged
+        instead of turning a valid result into an error.
+        """
         if self._instrument is None:
             return
         try:
-            self._drain_error_queue()
-            self._write("SYSTem:LOCal")
+            for step in (self._drain_error_queue, lambda: self._write("SYSTem:LOCal")):
+                try:
+                    step()
+                except Exception as exc:
+                    logger.warning("While closing: %s: %s", type(exc).__name__, exc)
         finally:
-            self._cleanup_resources()
+            try:
+                self._cleanup_resources()
+            except Exception as exc:
+                logger.warning("While releasing the VISA session: %s: %s", type(exc).__name__, exc)
 
     def reset(self) -> None:
         """Reset instrument to factory defaults and clear error queue.
@@ -163,20 +181,26 @@ class HMC8012:
             RangeOverflowError: If the instrument returns the overflow sentinel.
             ScpiError: If the instrument reports a SCPI error.
         """
-        raw = self._query("READ?")
-        try:
-            value = float(raw)
-        except ValueError as exc:
-            raise ScpiError(f"Invalid measurement response: '{raw}'") from exc
-
+        value = self._read_value()
+        if abs(value) >= self.OVERFLOW_SENTINEL:
+            # READ? returns the latest conversion, which may predate the call: read once more.
+            time.sleep(OVERFLOW_RETRY_WAIT_S)
+            value = self._read_value()
         if abs(value) >= self.OVERFLOW_SENTINEL:
             raise RangeOverflowError(
-                f"Range overflow (sentinel {raw}). "
+                "Range overflow on two consecutive readings. "
                 "Use a wider range or check probe connections."
             )
 
         self._check_errors()
         return value
+
+    def _read_value(self) -> float:
+        raw = self._query("READ?")
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ScpiError(f"Invalid measurement response: '{raw}'") from exc
 
     def set_range(self, function: str, range_value: str = "AUTO") -> None:
         """Configure measurement function and range without triggering.
@@ -326,6 +350,24 @@ class HMC8012:
         code_str = response.split(",")[0].strip()
         if code_str not in ("0", "+0"):
             raise ScpiError(f"Instrument error: {response}")
+
+    def _discard_pending_replies(self) -> None:
+        """Read and drop replies left in the input buffer, e.g. by an interrupted earlier command.
+
+        A stale reply would otherwise be taken as the answer to the next query
+        and shift every reply after it.
+        """
+        timeout = self._instrument.timeout
+        self._instrument.timeout = STALE_REPLY_TIMEOUT_MS
+        try:
+            for _ in range(self.MAX_ERROR_QUEUE_DEPTH):
+                try:
+                    stale = self._instrument.read()
+                except pyvisa.errors.VisaIOError:
+                    break
+                logger.warning("Discarded a stale reply: %r", stale)
+        finally:
+            self._instrument.timeout = timeout
 
     def _drain_error_queue(self) -> None:
         """Read all errors from the queue until empty."""
