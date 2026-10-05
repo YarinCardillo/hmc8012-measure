@@ -3,7 +3,7 @@
 Commands:
     python measure.py <address> <function> [--delay S]         One reading (READ?)
     python measure.py <address> <function> --time S [--timeout S] [capture flags]
-                                                               Capture for S seconds, mean running value
+                                                               Capture for S seconds, mean movement value
     python measure.py <address> <function> --auto [--timeout S] [capture flags]
                                                                Capture until the device is back at idle
     python measure.py <address> range <function> <value>       Configure function + range
@@ -19,6 +19,7 @@ Arguments:
     --time S        Capture for S seconds.
     --auto          Capture until the device has run and is back at idle (at most 30 s).
     --timeout S     Capture deadline; default: capture length + 10.
+    --rate R        ADC rate of the capture: SLOW (default), MED or FAST.
     --save-samples  Also write the raw readings to capture_samples_<UTC date>.csv.
     --save-plot     Also write the plot to capture_plot_<UTC date>.html.
     --live          Draw the capture in a small window while it runs.
@@ -71,14 +72,16 @@ DELAY_FLAG = "--delay"
 TIME_FLAG = "--time"
 TIMEOUT_FLAG = "--timeout"
 AUTO_FLAG = "--auto"
+RATE_FLAG = "--rate"
 SAVE_SAMPLES_FLAG = "--save-samples"
 SAVE_PLOT_FLAG = "--save-plot"
 LIVE_FLAG = "--live"
-VALUE_FLAGS = (DELAY_FLAG, TIME_FLAG, TIMEOUT_FLAG)
+VALUE_FLAGS = (DELAY_FLAG, TIME_FLAG, TIMEOUT_FLAG, RATE_FLAG)
 SWITCH_FLAGS = (AUTO_FLAG, SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
-CAPTURE_ONLY_FLAGS = (TIMEOUT_FLAG, SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
+CAPTURE_ONLY_FLAGS = (TIMEOUT_FLAG, RATE_FLAG, SAVE_SAMPLES_FLAG, SAVE_PLOT_FLAG, LIVE_FLAG)
 VALID_ADC_RATES = ("SLOW", "MED", "FAST")
-# Captures always read at SLOW: the only rate with specified accuracy, and it averages the stepper ripple.
+# Default ADC rate of captures: the only rate with specified accuracy. --rate MED or FAST resolves
+# movements of only a few SLOW conversions.
 CAPTURE_ADC_RATE = "SLOW"
 VALID_FUNCTIONS = sorted(HMC8012.VALID_FUNCTIONS)
 VALID_RANGE_FUNCTIONS = sorted(HMC8012.RANGE_SCPI_MAP.keys())
@@ -93,6 +96,7 @@ class CaptureOptions(NamedTuple):
     save_plot: bool
     show_live: bool
     stop_on_idle: bool
+    adc_rate: str
 
 
 class MeasureOptions(NamedTuple):
@@ -240,8 +244,8 @@ def cmd_adc(address: str, args: list[str]) -> None:
 def cmd_capture(address: str, function: str, options: CaptureOptions) -> None:
     """Handle: measure.py <address> <function> (--time S | --auto) [--timeout S] [capture flags]
 
-    Captures *function* (dci, dcv, aci or acv) at the SLOW ADC rate, analyzes
-    the waveform for the mean running value and writes it to result.txt in the
+    Captures *function* (dci, dcv, aci or acv) at the SLOW ADC rate (or
+    --rate), analyzes the waveform for the mean movement value and writes it to result.txt in the
     same format as a single reading. With --auto the capture stops by itself
     once the device has run and is back at idle. Caller must set the range
     beforehand (e.g. measure.py <address> range dci 2). Next to the script,
@@ -261,6 +265,7 @@ def cmd_capture(address: str, function: str, options: CaptureOptions) -> None:
                 live=live,
                 stop_on_idle=options.stop_on_idle,
                 function=function,
+                adc_rate=options.adc_rate,
             )
             write_result(str(analysis.stable_value))
             print(
@@ -323,7 +328,10 @@ def _parse_measure_args(function: str, args: list[str]) -> MeasureOptions:
 
 
 def _parse_capture_options(function: str, flags: dict[str, str | None]) -> CaptureOptions:
-    """--time S or --auto (at most AUTO_STOP_MAX_DURATION_S); timeout defaults to length + CAPTURE_TIMEOUT_MARGIN."""
+    """--time S or --auto (at most AUTO_STOP_MAX_DURATION_S); timeout defaults to length + CAPTURE_TIMEOUT_MARGIN.
+
+    --rate defaults to CAPTURE_ADC_RATE.
+    """
     if TIME_FLAG in flags and AUTO_FLAG in flags:
         _usage_error(f"{TIME_FLAG} and {AUTO_FLAG} exclude each other.")
     if function not in CAPTURE_FUNCTION_REPLIES:
@@ -335,8 +343,11 @@ def _parse_capture_options(function: str, flags: dict[str, str | None]) -> Captu
         timeout = _positive_number(flags[TIMEOUT_FLAG], TIMEOUT_FLAG)
         if timeout < duration:
             _usage_error("Timeout must be >= capture duration.")
+    adc_rate = (flags.get(RATE_FLAG) or CAPTURE_ADC_RATE).upper()
+    if adc_rate not in VALID_ADC_RATES:
+        _usage_error(f"{RATE_FLAG} must be one of {', '.join(VALID_ADC_RATES)}, got '{flags[RATE_FLAG]}'.")
     return CaptureOptions(
-        duration, timeout, SAVE_SAMPLES_FLAG in flags, SAVE_PLOT_FLAG in flags, LIVE_FLAG in flags, is_auto
+        duration, timeout, SAVE_SAMPLES_FLAG in flags, SAVE_PLOT_FLAG in flags, LIVE_FLAG in flags, is_auto, adc_rate
     )
 
 
@@ -353,7 +364,7 @@ def _read_flags(args: list[str]) -> dict[str, str | None]:
         elif token in VALUE_FLAGS:
             value = next(tokens, None)
             if value is None:
-                _usage_error(f"{token} needs a value in seconds.")
+                _usage_error(f"{token} needs a value.")
             flags[token] = value
         else:
             _usage_error(f"Unknown argument '{token}'. Expected {', '.join(VALUE_FLAGS + SWITCH_FLAGS)}.")
@@ -400,8 +411,9 @@ def _run_capture_session(
     live: LivePlot | None = None,
     stop_on_idle: bool = False,
     function: str = "dci",
+    adc_rate: str = CAPTURE_ADC_RATE,
 ) -> tuple[CaptureResult, AnalysisResult]:
-    """Execute one capture session at the SLOW ADC rate and return capture + analysis results.
+    """Execute one capture session at *adc_rate* and return capture + analysis results.
 
     With *stop_on_idle* the capture ends once the device has run and is back
     at idle; *duration* is then only its upper bound.
@@ -415,7 +427,7 @@ def _run_capture_session(
     result = None
     try:
         result = _acquire_capture(
-            address, function, duration, timeout, live.add_sample if live else None, stop_on_idle
+            address, function, adc_rate, duration, timeout, live.add_sample if live else None, stop_on_idle
         )
         analysis = _analyze_capture(result)
     except Exception as exc:
@@ -429,16 +441,17 @@ def _run_capture_session(
 def _acquire_capture(
     address: str,
     function: str,
+    adc_rate: str,
     duration: float,
     timeout: float,
     on_sample: Callable[[float, float], None] | None,
     stop_on_idle: bool,
 ) -> CaptureResult:
-    """Read *function* at the SLOW ADC rate for *duration* s, or until back at idle, then restore the previous rate."""
+    """Read *function* at *adc_rate* for *duration* s, or until back at idle, then restore the previous rate."""
     should_stop = StopDetector().should_stop if stop_on_idle else None
     with HMC8012(address) as dmm:
         dmm.set_function(function)
-        with _temporary_adc_rate(dmm, CAPTURE_ADC_RATE):
+        with _temporary_adc_rate(dmm, adc_rate):
             capture = ContinuousCapture(dmm, function=function, max_duration=duration)
             return capture.run(deadline=time.monotonic() + timeout, on_sample=on_sample, should_stop=should_stop)
 
@@ -605,7 +618,7 @@ def _usage_error(message: str) -> None:
         "  python measure.py <address> <function> [--delay S]         One reading\n"
         "  python measure.py <address> <function> --time S            Capture for S seconds (dcv, acv, dci, aci)\n"
         "  python measure.py <address> <function> --auto              Capture until back at idle (at most 30 s)\n"
-        "      capture flags: [--timeout S] [--save-samples] [--save-plot] [--live]\n"
+        "      capture flags: [--timeout S] [--rate SLOW|MED|FAST] [--save-samples] [--save-plot] [--live]\n"
         "  python measure.py <address> range <function> <value>       Set range\n"
         "  python measure.py <address> adc [SLOW|MED|FAST]            Read or set the ADC rate\n"
         "  python measure.py <address> reset                          Reset\n"

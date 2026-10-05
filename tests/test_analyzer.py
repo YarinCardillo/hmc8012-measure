@@ -1,13 +1,14 @@
-"""Tests for the running-current analyzer.
+"""Tests for the movement analyzer.
 
-Requirement: report the mean current the device draws over its run (from the
-end of the start transient to the stop), for captures shaped idle, start,
-run, stop, idle, including step ripple and PWM/burst load, at any HMC8012
-ADC rate. A capture that does not allow a trustworthy value must raise, never
-return a wrong number.
+Requirement: report the mean current of the movement that lies between the
+deltastep peaks of a capture (deltastep strokes, movement, deltastep
+strokes, idle; the capture may start during the strokes), leaving out the
+conversions that straddle the movement's start and stop. The capture must
+end at idle. A capture without a trustworthy value must raise, never return
+a wrong number.
 
-Realistic captures come from the physical simulation (simulation.py,
-scenarios.py); edge cases use hand-built arrays.
+Real captures are the lab recordings (tests/data/lab); synthetic ones come
+from the physical simulation and from hand-built conversion sequences.
 """
 
 from dataclasses import replace
@@ -23,240 +24,165 @@ from analyzer import (
     InvalidCaptureError,
     SignalNotSettledError,
     analyze_waveform,
-    smooth_level,
 )
+from tests.lab_captures import LAB_CAPTURES, load_lab_capture
 from scenarios import SCENARIOS
 from simulation import InstrumentModel, SimulatedCapture, simulate_capture
 
 OVERFLOW_SENTINEL = 9.90000000e37
 ADC_RATES = ("SLOW", "MED", "FAST")
-SCENARIOS_WITH_STEADY_RUN = ("nominal", "long_idle_after", "high_current", "pwm_load", "run_to_end")
-SCENARIOS_CORRECT_OR_RAISE = ("slow_settle", "slow_bursts", "aliasing", "hold_after_stop", "pre_and_post_hold")
+IDLE_A = 0.167
+PEAK_A = 0.625
+MOVEMENT_A = 0.190
+# One SLOW conversion.
+PERIOD_S = 0.2
+MOTOR1_CAPTURES = [name for name in LAB_CAPTURES if name.endswith("motor1")]
+MOTOR2_CAPTURES = [name for name in LAB_CAPTURES if name.endswith("motor2")]
 
 
 def _simulate(name: str, adc_rate: str, seed: int = 3) -> SimulatedCapture:
     return simulate_capture(SCENARIOS[name].phases(), InstrumentModel(adc_rate=adc_rate), seed=seed)
 
 
-def _tolerance(value: float, config: AnalysisConfig = AnalysisConfig()) -> float:
-    return max(config.abs_tolerance_a, config.rel_tolerance * abs(value))
+def _tolerance(value: float) -> float:
+    return max(0.002, 0.02 * abs(value))
 
 
-def _step_capture(levels_and_durations: list[tuple[float, float]], rate_hz: float = 100.0):
-    """Noise-free piecewise-constant capture sampled uniformly."""
-    values = np.concatenate([np.full(round(d * rate_hz), level) for level, d in levels_and_durations])
-    return np.arange(len(values)) / rate_hz, values
+def _conversions(steps: list[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:
+    """One reading per SLOW conversion; *steps* are ``(current, duration)`` pairs."""
+    values = np.concatenate([np.full(round(duration / PERIOD_S), level) for level, duration in steps])
+    return np.arange(len(values)) * PERIOD_S, values
 
 
-def _assert_correct_or_raises(timestamps, values, truth: float, config: AnalysisConfig = AnalysisConfig()) -> None:
+def _assert_correct_or_raises(timestamps, values, truth: float) -> None:
     try:
-        result = analyze_waveform(timestamps, values, config)
+        result = analyze_waveform(timestamps, values)
     except AnalysisError:
         return
-    assert abs(result.stable_value - truth) <= _tolerance(truth, config)
+    assert abs(result.stable_value - truth) <= _tolerance(truth)
+
+
+class TestLabCaptures:
+    @pytest.mark.parametrize("name", MOTOR1_CAPTURES)
+    def test_motor1_reports_its_movement_level(self, name):
+        # The movement plateau reads 187-195 mA between the deltastep groups.
+        assert analyze_waveform(*load_lab_capture(name)).stable_value == pytest.approx(0.1902, abs=0.0008)
+
+    @pytest.mark.parametrize("name", MOTOR1_CAPTURES)
+    def test_motor1_movement_lies_between_the_deltastep_groups(self, name):
+        result = analyze_waveform(*load_lab_capture(name))
+        assert 2.7 <= result.start_time <= 3.3
+        assert 4.9 <= result.end_time <= 5.5
+
+    @pytest.mark.parametrize("name", MOTOR2_CAPTURES)
+    def test_motor2_at_slow_is_its_movement_level_or_an_error(self, name):
+        # Only the middle SLOW conversion of its 0.6 s movement is clean: 196 mA in all four captures.
+        _assert_correct_or_raises(*load_lab_capture(name), truth=0.1962)
+
+    def test_motor2_with_two_clean_conversions_reports_196_ma(self):
+        result = analyze_waveform(*load_lab_capture("2026-10-02_16-31-35_motor2"))
+        assert result.stable_value == pytest.approx(0.1962, abs=0.0005)
 
 
 class TestScenarios:
     @pytest.mark.parametrize("adc_rate", ADC_RATES)
-    @pytest.mark.parametrize("name", SCENARIOS_WITH_STEADY_RUN)
-    def test_scenario_reports_running_mean_within_tolerance(self, name, adc_rate):
+    @pytest.mark.parametrize("name", ["motor1", "starts_in_deltastep"])
+    def test_long_movement_is_measured_at_every_adc_rate(self, name, adc_rate):
         capture = _simulate(name, adc_rate)
         result = analyze_waveform(capture.timestamps, capture.values)
         assert abs(result.stable_value - capture.expected_value) <= _tolerance(capture.expected_value)
 
-    @pytest.mark.parametrize("adc_rate", ADC_RATES)
-    @pytest.mark.parametrize("name", SCENARIOS_CORRECT_OR_RAISE)
-    def test_difficult_scenario_is_correct_or_raises(self, name, adc_rate):
-        capture = _simulate(name, adc_rate)
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    @pytest.mark.parametrize("adc_rate", ["MED", "FAST"])
+    def test_short_movement_is_measured_at_faster_adc_rates(self, adc_rate, seed):
+        capture = _simulate("motor2", adc_rate, seed)
+        result = analyze_waveform(capture.timestamps, capture.values)
+        assert abs(result.stable_value - capture.expected_value) <= _tolerance(capture.expected_value)
+
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_short_movement_at_slow_is_correct_or_raises(self, seed):
+        capture = _simulate("motor2", "SLOW", seed)
         _assert_correct_or_raises(capture.timestamps, capture.values, capture.expected_value)
 
-    @pytest.mark.parametrize("adc_rate", ("SLOW", "MED"))
-    def test_near_sync_ripple_is_averaged_by_slow_adc_rates(self, adc_rate):
-        # At FAST the beat is slower than the run and biases the level undetectably (documented limit).
-        capture = _simulate("near_sync_ripple", adc_rate)
-        result = analyze_waveform(capture.timestamps, capture.values)
-        assert abs(result.stable_value - capture.expected_value) <= _tolerance(capture.expected_value)
 
-
-class TestRunDetection:
-    def test_idle_only_capture_raises_not_settled(self):
-        timestamps, values = _step_capture([(0.03, 6.0)])
-        with pytest.raises(SignalNotSettledError):
-            analyze_waveform(timestamps, values)
-
-    def test_run_interval_spans_start_to_stop(self):
-        timestamps, values = _step_capture([(0.03, 2.0), (0.35, 3.0), (0.03, 2.0)])
+class TestMovementDetection:
+    def test_conversions_straddling_the_movement_edges_are_left_out(self):
+        timestamps, values = _conversions(
+            [(PEAK_A, 0.6), (0.35, 0.2), (MOVEMENT_A, 2.0), (0.30, 0.2), (PEAK_A, 0.6), (IDLE_A, 3.0)]
+        )
         result = analyze_waveform(timestamps, values)
-        assert result.run_start_time == pytest.approx(2.0, abs=0.02)
-        assert result.run_end_time == pytest.approx(5.0, abs=0.02)
-        assert result.idle_level == pytest.approx(0.03)
+        assert result.stable_value == pytest.approx(MOVEMENT_A)
+        assert (result.start_time, result.end_time) == pytest.approx((0.8, 2.6))
+        assert (result.run_start_time, result.run_end_time) == pytest.approx((0.6, 2.8))
+        assert result.idle_level == pytest.approx(IDLE_A)
 
-    @pytest.mark.parametrize("adc_rate", ADC_RATES)
-    def test_one_second_run_reports_running_mean(self, adc_rate):
-        sc = SCENARIOS["nominal"]
-        capture = simulate_capture(sc.phases(replace(sc.defaults, run_s=1.0)), InstrumentModel(adc_rate=adc_rate), seed=0)
-        result = analyze_waveform(capture.timestamps, capture.values)
-        assert abs(result.stable_value - capture.expected_value) <= _tolerance(capture.expected_value)
+    def test_short_stretches_inside_the_deltastep_groups_are_ignored(self):
+        timestamps, values = _conversions(
+            [(PEAK_A, 0.4), (0.32, 0.2), (0.25, 0.2), (PEAK_A, 0.4), (MOVEMENT_A, 2.0), (PEAK_A, 0.6), (IDLE_A, 3.0)]
+        )
+        assert analyze_waveform(timestamps, values).stable_value == pytest.approx(MOVEMENT_A)
 
-    def test_run_until_capture_end_is_averaged(self):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.35, 4.0)])
-        result = analyze_waveform(timestamps, values)
-        assert result.stable_value == pytest.approx(0.35)
-
-    def test_brief_glitch_is_part_of_the_running_mean(self):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.35, 3.0), (0.6, 0.05), (0.35, 3.0), (0.03, 1.0)])
-        values = values + np.random.default_rng(0).normal(0.0, 0.0005, len(values))  # instrument noise
-        result = analyze_waveform(timestamps, values)
-        assert result.stable_value == pytest.approx((0.35 * 6.0 + 0.6 * 0.05) / 6.05, abs=0.001)
-
-    def test_recurring_brief_loads_are_included_or_rejected(self):
-        values = np.full(1800, 0.03)
-        values[100:1600] = 0.35
-        values[100:110] = 0.9
-        for start in (400, 900, 1400):
-            values[start:start + 10] = 1.5
-        timestamps = np.arange(1800) / 100
-        _assert_correct_or_raises(timestamps, values, float(np.mean(values[110:1600])))
-
-    def test_noisy_idle_does_not_count_as_a_run(self):
-        capture = simulate_capture(SCENARIOS["nominal"].phases(), InstrumentModel(adc_rate="SLOW", noise_a=0.010), seed=0)
-        result = analyze_waveform(capture.timestamps, capture.values)
-        assert abs(result.stable_value - capture.expected_value) <= _tolerance(capture.expected_value)
-
-    def test_two_separate_runs_raise_ambiguous(self):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.35, 2.0), (0.03, 2.0), (0.35, 2.0), (0.03, 1.0)])
+    def test_two_movements_raise_ambiguous(self):
+        timestamps, values = _conversions(
+            [(PEAK_A, 0.6), (MOVEMENT_A, 1.0), (PEAK_A, 0.6), (0.21, 1.0), (PEAK_A, 0.6), (IDLE_A, 3.0)]
+        )
         with pytest.raises(AmbiguousRunError):
             analyze_waveform(timestamps, values)
 
-
-class TestNotSteadyRun:
-    @pytest.mark.parametrize("levels", [
-        [(0.03, 1.0), (0.9, 0.1), (0.35, 2.0), (0.55, 6.0), (0.03, 2.0)],   # hold longer than run
-        [(0.03, 1.0), (0.9, 0.1), (0.35, 1.4), (0.55, 6.0), (0.03, 2.0)],   # short run, then hold
-        [(0.03, 1.0), (0.7, 1.8), (0.35, 6.0)],                              # two running levels
-        [(0.03, 1.0), (0.35, 2.0), (0.05, 8.0), (0.08, 0.05)],               # standby after stop
-    ])
-    def test_two_levels_in_one_run_raise(self, levels):
-        timestamps, values = _step_capture(levels)
+    def test_movement_of_one_conversion_raises_not_settled(self):
+        timestamps, values = _conversions([(PEAK_A, 0.6), (MOVEMENT_A, 0.2), (PEAK_A, 0.6), (IDLE_A, 3.0)])
         with pytest.raises(SignalNotSettledError):
             analyze_waveform(timestamps, values)
 
-    @pytest.mark.parametrize("hold_s", [10.0, 20.0])
-    def test_long_hold_after_short_run_raises(self, hold_s):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.9, 0.1), (0.35, 1.2), (0.55, hold_s), (0.03, 1.0)])
-        values = values + np.random.default_rng(42).normal(0.0, 0.0005, len(values))
+    def test_idle_only_capture_raises_not_settled(self):
         with pytest.raises(SignalNotSettledError):
-            analyze_waveform(timestamps, values)
+            analyze_waveform(*_conversions([(IDLE_A, 5.0)]))
 
-    def test_slow_burst_cycles_are_averaged_or_rejected(self):
-        timestamps = np.arange(0.0, 15.0, 0.01)
-        running = (timestamps >= 1.0) & (timestamps < 13.0)
-        values = np.where(running, 0.35 + 0.2 * (((timestamps - 1.0) % 4.0) < 1.0), 0.03)
-        _assert_correct_or_raises(timestamps, values, 0.40)
-
-    @pytest.mark.parametrize("slope", [0.005, 0.02])
-    def test_continuous_drift_raises(self, slope):
-        timestamps = np.arange(0.0, 14.0, 0.01)
-        running = (timestamps >= 1.0) & (timestamps < 11.0)
-        values = np.where(running, 0.35 + slope * (timestamps - 1.0), 0.03)
-        values[100:110] = 0.9
-        with pytest.raises(SignalNotSettledError):
-            analyze_waveform(timestamps, values)
-
-
-class TestPreconditions:
-    def test_short_initial_idle_raises_invalid_capture(self):
-        timestamps, values = _step_capture([(0.03, 0.1), (0.35, 4.0), (0.03, 4.0)])
+    def test_capture_not_ending_at_idle_raises_invalid_capture(self):
+        timestamps, values = _conversions([(PEAK_A, 0.4), (IDLE_A, 0.2), (PEAK_A, 0.4), (MOVEMENT_A, 2.0)])
         with pytest.raises(InvalidCaptureError):
             analyze_waveform(timestamps, values)
 
-    def test_capture_starting_during_inrush_raises_invalid_capture(self):
-        timestamps, values = _step_capture([(0.9, 0.2), (0.35, 1.2), (0.03, 4.0)])
-        with pytest.raises(InvalidCaptureError):
-            analyze_waveform(timestamps, values)
-
-    def test_invalid_readings_at_capture_start_do_not_move_the_idle_check(self):
-        timestamps = np.arange(1000) / 100
-        values = np.repeat([np.nan, 0.35, 0.7, 0.03], [100, 200, 500, 200])
-        with pytest.raises(InvalidCaptureError):
-            analyze_waveform(timestamps, values)
-
-    def test_capture_starting_while_running_finds_no_run_above_start_level(self):
-        timestamps, values = _step_capture([(0.35, 3.0), (0.03, 4.0)])
-        with pytest.raises(SignalNotSettledError):
-            analyze_waveform(timestamps, values)
-
-
-class TestStableValue:
-    def test_too_few_independent_readings_raise_imprecise(self):
-        # Flat smoothed level, but only 15 independent readings of a +/-65 mA bimodal spread.
-        rate_hz = 50.0
-        pattern = np.repeat([0.50, 0.35, 0.35, 0.35], int(0.2 * rate_hz))
-        run = np.tile(pattern, 4)[: int(3.0 * rate_hz)]
-        idle = np.full(int(2 * rate_hz), 0.03)
-        values = np.concatenate([idle, run, idle])
-        timestamps = np.arange(len(values)) / rate_hz
+    def test_scattered_movement_raises_imprecise(self):
+        steps = [(PEAK_A, 0.6)] + [(0.200, 0.2), (0.180, 0.2)] * 3 + [(PEAK_A, 0.6), (IDLE_A, 3.0)]
         with pytest.raises(ImpreciseValueError):
-            analyze_waveform(timestamps, values)
+            analyze_waveform(*_conversions(steps))
 
-    def test_standard_error_reported_for_noisy_run(self):
-        capture = _simulate("pwm_load", "FAST")
-        result = analyze_waveform(capture.timestamps, capture.values)
-        assert 0.0 < result.standard_error <= _tolerance(result.stable_value) / 2
+    def test_repeated_polls_of_one_conversion_count_once(self):
+        # The instrument answers READ? with its last conversion: polling five times faster repeats each value.
+        timestamps, values = _conversions(
+            [(PEAK_A, 0.6), (0.35, 0.2), (0.189, 0.2), (0.191, 0.2), (0.30, 0.2), (PEAK_A, 0.6), (IDLE_A, 3.0)]
+        )
+        polled_times = (timestamps[:, None] + np.arange(5) * PERIOD_S / 5).ravel()
+        result = analyze_waveform(polled_times, np.repeat(values, 5))
+        assert result.stable_value == pytest.approx(0.190)
+        assert result.samples_used == 2
 
-    def test_smooth_level_weights_samples_by_time_not_by_count(self):
-        timestamps = np.r_[np.arange(0.0, 0.25, 0.001), np.arange(0.25, 0.5, 0.1)]
-        values = np.where(timestamps < 0.25, 0.3, 0.5)
-        # Window [0, 0.5] clipped to the data span [0, 0.45]: 0.25 s at 0.3 A, 0.2 s at 0.5 A.
-        assert smooth_level(timestamps, values, 0.5)[250] == pytest.approx((0.25 * 0.3 + 0.2 * 0.5) / 0.45, abs=1e-3)
-
-    def test_stable_value_is_time_weighted_under_uneven_polling(self):
-        dense_t = np.arange(1.0, 3.0, 0.001)
-        sparse_t = np.arange(3.0, 5.0, 0.1)
-        timestamps = np.concatenate([np.arange(0.0, 1.0, 0.01), dense_t, sparse_t])
-        values = np.concatenate([np.full(100, 0.03), np.full(len(dense_t), 0.349), np.full(len(sparse_t), 0.351)])
+    def test_result_indices_refer_to_original_arrays(self):
+        timestamps, values = _conversions([(PEAK_A, 0.6), (0.35, 0.2), (MOVEMENT_A, 2.0), (PEAK_A, 0.6), (IDLE_A, 3.0)])
+        values[1] = np.nan
         result = analyze_waveform(timestamps, values)
-        assert result.stable_value == pytest.approx(0.350, abs=0.0005)
-
-    def test_result_indices_refer_to_original_arrays_when_invalid_samples_removed(self):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.35, 3.0), (0.03, 1.0)])
-        values = values.copy()
-        values[[50, 60, 70]] = OVERFLOW_SENTINEL
-        result = analyze_waveform(timestamps, values)
-        assert timestamps[result.start_index] == pytest.approx(result.start_time)
-        assert timestamps[result.end_index - 1] <= result.end_time
-        assert result.samples_used == result.end_index - result.start_index
+        assert np.all(values[result.start_index:result.end_index] == MOVEMENT_A)
+        assert values[result.start_index - 1] == 0.35
+        assert values[result.end_index] == PEAK_A
 
 
 class TestInputValidation:
     def test_nan_samples_count_as_invalid(self):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.35, 3.0), (0.03, 1.0)])
-        values = values.copy()
+        timestamps, values = _conversions([(PEAK_A, 0.6), (MOVEMENT_A, 2.0), (PEAK_A, 0.6), (IDLE_A, 3.0)])
         values[::2] = np.nan
         with pytest.raises(InvalidCaptureError):
             analyze_waveform(timestamps, values)
 
-    def test_invalid_readings_inside_the_run_raise(self):
-        # Overflowing peaks: dropping them would bias the mean low.
-        timestamps = np.arange(1200) / 100
-        values = np.full(1200, 0.03)
-        values[100:1100] = 0.15
-        for start in range(100, 1100, 20):
-            values[start + 10:start + 12] = np.nan
-        with pytest.raises(InvalidCaptureError):
-            analyze_waveform(timestamps, values)
-
-    def test_negative_overflow_sentinel_counts_as_invalid(self):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.35, 3.0), (0.03, 1.0)])
-        values = values.copy()
-        values[20] = -OVERFLOW_SENTINEL
-        result = analyze_waveform(timestamps, values)
-        assert result.stable_value == pytest.approx(0.35)
+    @pytest.mark.parametrize("sentinel", [OVERFLOW_SENTINEL, -OVERFLOW_SENTINEL])
+    def test_overflow_sentinels_in_the_peaks_do_not_affect_the_value(self, sentinel):
+        timestamps, values = _conversions([(PEAK_A, 0.6), (MOVEMENT_A, 2.0), (PEAK_A, 0.6), (IDLE_A, 3.0)])
+        values[1] = sentinel
+        assert analyze_waveform(timestamps, values).stable_value == pytest.approx(MOVEMENT_A)
 
     def test_non_increasing_timestamps_raise(self):
-        timestamps, values = _step_capture([(0.03, 1.0), (0.35, 3.0)])
-        timestamps = timestamps.copy()
-        timestamps[50] = timestamps[49]
+        timestamps, values = _conversions([(PEAK_A, 0.6), (MOVEMENT_A, 2.0), (IDLE_A, 3.0)])
+        timestamps[5] = timestamps[4]
         with pytest.raises(InvalidCaptureError):
             analyze_waveform(timestamps, values)
 
@@ -268,15 +194,11 @@ class TestInputValidation:
         with pytest.raises(InvalidCaptureError):
             analyze_waveform(np.array([]), np.array([]))
 
-    @pytest.mark.parametrize("field", ["smoothing_window_s", "min_run_s", "rel_tolerance"])
-    def test_config_rejects_non_positive_values(self, field):
+    @pytest.mark.parametrize("field", ["rel_tolerance", "abs_tolerance_a"])
+    @pytest.mark.parametrize("value", [0.0, float("nan"), float("inf")])
+    def test_config_rejects_non_positive_or_non_finite_tolerances(self, field, value):
         with pytest.raises(ValueError):
-            replace(AnalysisConfig(), **{field: 0.0})
-
-    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
-    def test_config_rejects_non_finite_values(self, value):
-        with pytest.raises(ValueError):
-            AnalysisConfig(max_settle_s=value)
+            replace(AnalysisConfig(), **{field: value})
 
     @pytest.mark.parametrize("timestamps", [[0, "bad"], [0, 10**500]])
     def test_unconvertible_timestamps_raise_invalid_capture(self, timestamps):

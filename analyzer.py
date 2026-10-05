@@ -1,28 +1,26 @@
-"""Running-current analysis of a captured device current.
+"""Movement-current analysis of a captured device current.
 
-Reports the mean current the device draws over its run, in a capture shaped
-idle, start, run, stop, idle. Pure computation on numpy arrays, no instrument
-interaction.
+Reports the mean current of the movement that lies between the deltastep
+peaks of a capture: deltastep strokes, movement, deltastep strokes, idle.
+The capture may start during the strokes; it must end at idle. Pure
+computation on numpy arrays, no instrument interaction.
 
 Pipeline:
     1. Validate: aligned 1-D arrays, strictly increasing timestamps. NaN/inf
-       readings and overflow sentinels (either sign) are invalid samples; too
-       many of them reject the capture.
-    2. Idle: the capture must open with steady idle current. Its level is the
-       reference.
-    3. Run: where the time-weighted smoothed level sits above idle by more than
-       two tolerances (motors only add current), with a mean above idle beyond
-       its noise, so idle fluctuations do not count as runs. Exactly one run of at least
-       ``min_run_s`` is expected; its edges are refined on the raw readings.
-    4. Averaging window: the run minus the shortest start and end trims (each
-       up to ``max_settle_s``, for inrush, acceleration and deceleration) whose
-       blocks of two smoothing windows agree on the mean within tolerance, with
-       no invalid reading inside. No such window means the run is not steady:
-       drift, a second level (hold, standby), or loads slower than a block.
-       The window must also be precise: two standard errors (from the
-       readings and from the spread of the block means) within tolerance.
-    5. Report the time-weighted mean over the window, each reading held until
-       the next.
+       readings and overflow sentinels (either sign) are invalid; too many of
+       them reject the capture.
+    2. Conversions: the instrument answers READ? with its last conversion, so
+       consecutive equal readings are one conversion.
+    3. Idle: the steady level at the end of the capture. It must be the
+       lowest level of the capture (the device returns to idle).
+    4. Peaks: conversions above the midpoint between idle and the highest
+       conversion; invalid readings count as peaks.
+    5. Movement: stretches of consecutive conversions between idle (plus two
+       tolerances) and the peaks. The edge conversions that do not match a
+       stretch's level straddle its start or stop and are left out. Exactly
+       one stretch may last at least MIN_MOVEMENT_S.
+    6. Report the mean of the movement's conversions, if it is known within
+       tolerance at two standard errors.
 """
 
 import logging
@@ -35,49 +33,37 @@ logger = logging.getLogger(__name__)
 
 # Instrument overflow sentinel (matches HMC8012.OVERFLOW_SENTINEL).
 OVERFLOW_SENTINEL = 9.90000000e37
-# The run starts this many tolerances above idle.
+# The movement starts this many tolerances above idle.
 RUN_THRESHOLD_TOLERANCES = 2.0
-# A run's mean must exceed idle by this many standard errors (rejects idle noise excursions).
-RUN_SIGNIFICANCE_SIGMAS = 3.0
+# Peaks start at this fraction of the way from idle to the highest conversion.
+PEAK_THRESHOLD_FRACTION = 0.5
 # The reported mean must be known within the tolerance at this many sigma.
 PRECISION_Z_SCORE = 2.0
-# Steady idle required at capture start to trust the idle reference.
+# Steady idle required at the end of the capture.
 MIN_IDLE_S = 0.25
-# Stationarity blocks last this many smoothing windows, so their sensitivity does not depend on run length.
-BLOCK_SMOOTHING_WINDOWS = 2.0
-MIN_BLOCKS = 2
-TRIM_STEP_S = 0.1
+# Shortest movement, edges left out: longer than one SLOW conversion (about 0.2 s).
+MIN_MOVEMENT_S = 0.3
 
 
 @dataclass(frozen=True)
 class AnalysisConfig:
-    """Tuning of the running-current analysis.
+    """Tuning of the movement analysis.
 
     Attributes:
-        smoothing_window_s: Moving-mean window used to find idle and the run.
-            Must cover a couple of periods of any ripple or burst load.
-        min_run_s: Minimum length of the run and of the averaging window.
-        max_settle_s: Longest start or end trim allowed to reach a steady
-            window (inrush, acceleration, deceleration).
-        rel_tolerance: Relative tolerance on the running mean (0.02 = 2%).
+        rel_tolerance: Relative tolerance on the movement mean (0.02 = 2%).
         abs_tolerance_a: Absolute floor of the tolerance (amperes).
         max_invalid_fraction: Maximum fraction of NaN/inf/overflow samples.
     """
 
-    smoothing_window_s: float = 0.5
-    min_run_s: float = 0.5
-    max_settle_s: float = 1.0
     rel_tolerance: float = 0.02
     abs_tolerance_a: float = 0.002
     max_invalid_fraction: float = 0.20
 
     def __post_init__(self) -> None:
-        for name in ("smoothing_window_s", "min_run_s", "rel_tolerance", "abs_tolerance_a"):
+        for name in ("rel_tolerance", "abs_tolerance_a"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"AnalysisConfig.{name} must be finite and > 0, got {value}")
-        if not math.isfinite(self.max_settle_s) or self.max_settle_s < 0:
-            raise ValueError(f"AnalysisConfig.max_settle_s must be finite and >= 0, got {self.max_settle_s}")
         if not 0.0 <= self.max_invalid_fraction < 1.0:
             raise ValueError(
                 f"AnalysisConfig.max_invalid_fraction must be in [0, 1), got {self.max_invalid_fraction}"
@@ -90,20 +76,20 @@ class AnalysisConfig:
 
 @dataclass(frozen=True)
 class AnalysisResult:
-    """Result of the running-current analysis.
+    """Result of the movement analysis.
 
     Attributes:
-        stable_value: Time-weighted mean current over the averaging window.
-        stable_std_dev: Standard deviation of the readings in the window.
+        stable_value: Mean current of the movement's conversions (amperes).
+        stable_std_dev: Standard deviation of those conversions.
         standard_error: Uncertainty (1 sigma) of *stable_value* (amperes).
-        start_time: First reading of the averaging window (seconds).
-        end_time: Last reading of the averaging window (seconds).
-        start_index: First sample of the window (original arrays).
-        end_index: One past its last sample (original arrays).
-        samples_used: Valid samples in the window.
-        idle_level: Current of the steady idle at capture start (amperes).
-        run_start_time: First reading above idle (seconds).
-        run_end_time: Last reading above idle (seconds).
+        start_time: First reading of the averaged conversions (seconds).
+        end_time: Last reading of the averaged conversions (seconds).
+        start_index: First sample of the averaged conversions (original arrays).
+        end_index: One past their last sample (original arrays).
+        samples_used: Number of averaged conversions.
+        idle_level: Current of the steady idle at capture end (amperes).
+        run_start_time: First reading of the movement stretch, edges included (seconds).
+        run_end_time: Last reading of the movement stretch, edges included (seconds).
     """
 
     stable_value: float
@@ -124,19 +110,30 @@ class AnalysisError(Exception):
 
 
 class SignalNotSettledError(AnalysisError):
-    """Raised when the capture has no run, or a run that is not steady."""
+    """Raised when the capture has no movement of at least MIN_MOVEMENT_S between the peaks."""
 
 
 class AmbiguousRunError(AnalysisError):
-    """Raised when the capture holds more than one separate run."""
+    """Raised when the capture holds more than one movement."""
 
 
 class InvalidCaptureError(AnalysisError):
-    """Raised when the capture arrays are malformed, mostly invalid, or not idle at start."""
+    """Raised when the capture arrays are malformed, mostly invalid, or not idle at the end."""
 
 
 class ImpreciseValueError(AnalysisError):
-    """Raised when the running mean is not known within tolerance (too few or too noisy readings)."""
+    """Raised when the movement mean is not known within tolerance (too few or too scattered conversions)."""
+
+
+@dataclass(frozen=True)
+class _Conversions:
+    """Consecutive equal readings merged into conversions; invalid readings are +inf."""
+
+    times: np.ndarray
+    values: np.ndarray
+    first_sample: np.ndarray
+    end_sample: np.ndarray
+    end_time: np.ndarray
 
 
 def analyze_waveform(
@@ -144,7 +141,7 @@ def analyze_waveform(
     values: np.ndarray,
     config: AnalysisConfig = AnalysisConfig(),
 ) -> AnalysisResult:
-    """Extract the mean running current from a captured waveform.
+    """Extract the mean movement current from a captured waveform.
 
     Args:
         timestamps: 1-D sample times in seconds, strictly increasing.
@@ -152,49 +149,28 @@ def analyze_waveform(
         config: Analysis tuning.
 
     Returns:
-        :class:`AnalysisResult` for the averaging window of the run.
+        :class:`AnalysisResult` for the movement's conversions.
 
     Raises:
         InvalidCaptureError: Malformed arrays, too many invalid samples, or no
-            steady idle at capture start.
-        SignalNotSettledError: No run, or a run that is not steady.
-        AmbiguousRunError: More than one separate run.
-        ImpreciseValueError: The running mean is not known within tolerance.
+            steady idle at capture end.
+        SignalNotSettledError: No movement of at least MIN_MOVEMENT_S.
+        AmbiguousRunError: More than one movement.
+        ImpreciseValueError: The movement mean is not known within tolerance.
     """
-    times, currents, original_index, capture_start = _valid_samples(timestamps, values, config)
-    integral = _time_integral(times, currents)
-    level = _smooth(times, integral, config.smoothing_window_s)
-    idle_level = _idle_level(times, integral, level, capture_start, config)
-    run_start, run_end = _run_bounds(times, currents, level, idle_level, config)
-    first, last = _averaging_window(times, integral, currents, original_index, (run_start, run_end), config)
-    return _result(times, currents, integral, original_index, (first, last), (run_start, run_end), idle_level, config)
+    times, currents, is_valid = _checked_arrays(timestamps, values, config)
+    conversions = _conversions(times, currents, is_valid)
+    idle_level = _idle_level(times, currents, is_valid, conversions, config)
+    run, movement = _movement(conversions, idle_level, config)
+    return _result(times, conversions, run, movement, idle_level, config)
 
 
-def smooth_level(times: np.ndarray, currents: np.ndarray, window_s: float) -> np.ndarray:
-    """Time-weighted centered moving mean, each reading held until the next.
-
-    Args:
-        times: Strictly increasing sample times (seconds).
-        currents: Valid current samples (no NaN/overflow), same length.
-        window_s: Window length in seconds; clipped to the capture at the edges.
-
-    Returns:
-        Smoothed current, one value per sample.
-    """
-    return _smooth(times, _time_integral(times, currents), window_s)
-
-
-def _valid_samples(
+def _checked_arrays(
     timestamps: np.ndarray,
     values: np.ndarray,
     config: AnalysisConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Check array shape and timing, drop invalid readings.
-
-    Returns:
-        ``(times, currents, original_index, capture_start)``; *capture_start*
-        is the first timestamp before invalid readings were dropped.
-    """
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Check array shape, timing and invalid fraction; return ``(times, currents, is_valid)``."""
     try:
         times = np.asarray(timestamps, dtype=float)
         currents = np.asarray(values, dtype=float)
@@ -208,7 +184,6 @@ def _valid_samples(
         raise InvalidCaptureError(f"Need at least 2 samples, got {len(times)}")
     if not np.all(np.isfinite(times)) or np.any(np.diff(times) <= 0):
         raise InvalidCaptureError("timestamps must be finite and strictly increasing")
-
     is_valid = np.isfinite(currents) & (np.abs(currents) < OVERFLOW_SENTINEL)
     invalid_count = len(currents) - int(np.count_nonzero(is_valid))
     if invalid_count / len(currents) > config.max_invalid_fraction:
@@ -217,251 +192,142 @@ def _valid_samples(
             f"({invalid_count / len(currents):.1%} > {config.max_invalid_fraction:.0%})"
         )
     if invalid_count:
-        logger.warning("Ignoring %d invalid samples (NaN, inf or overflow)", invalid_count)
-    original_index = np.flatnonzero(is_valid)
-    if len(original_index) < 2:
-        raise InvalidCaptureError(f"Need at least 2 valid samples, got {len(original_index)}")
-    return times[original_index], currents[original_index], original_index, float(times[0])
+        logger.warning("Treating %d invalid samples (NaN, inf or overflow) as peaks", invalid_count)
+    return times, currents, is_valid
 
 
-def _time_integral(times: np.ndarray, currents: np.ndarray) -> np.ndarray:
-    """Running integral of the current at each sample time, each reading held until the next."""
-    return np.concatenate(([0.0], np.cumsum(currents[:-1] * np.diff(times))))
-
-
-def _mean_between(times: np.ndarray, integral: np.ndarray, first: np.ndarray, last: np.ndarray) -> np.ndarray:
-    """Time-weighted mean current between pairs of times (elementwise)."""
-    return (np.interp(last, times, integral) - np.interp(first, times, integral)) / (last - first)
-
-
-def _smooth(times: np.ndarray, integral: np.ndarray, window_s: float) -> np.ndarray:
-    first = np.clip(times - window_s / 2.0, times[0], times[-1])
-    last = np.clip(times + window_s / 2.0, times[0], times[-1])
-    return _mean_between(times, integral, first, last)
-
-
-def _fits_band(low: float, high: float, config: AnalysisConfig) -> bool:
-    return high - low <= 2.0 * config.tolerance((high + low) / 2.0)
+def _conversions(times: np.ndarray, currents: np.ndarray, is_valid: np.ndarray) -> _Conversions:
+    """Merge consecutive equal readings; each conversion lasts until the next one starts."""
+    values = np.where(is_valid, currents, math.inf)
+    first = np.flatnonzero(np.concatenate(([True], values[1:] != values[:-1])))
+    end = np.append(first[1:], len(values))
+    capture_end = times[-1] + (times[-1] - times[-2])
+    return _Conversions(
+        times=times[first],
+        values=values[first],
+        first_sample=first,
+        end_sample=end,
+        end_time=np.append(times[first[1:]], capture_end),
+    )
 
 
 def _idle_level(
     times: np.ndarray,
-    integral: np.ndarray,
-    level: np.ndarray,
-    capture_start: float,
+    currents: np.ndarray,
+    is_valid: np.ndarray,
+    conversions: _Conversions,
     config: AnalysisConfig,
 ) -> float:
-    """Level of the steady idle that must open the capture."""
-    levels = level.tolist()
-    end, low, high = len(levels), levels[0], levels[0]
-    for index in range(1, len(levels)):
-        low, high = min(low, levels[index]), max(high, levels[index])
-        if not _fits_band(low, high, config):
-            end = index
-            break
-    duration = times[end - 1] - times[0]
-    if times[0] - capture_start > config.smoothing_window_s / 2.0 or duration < MIN_IDLE_S:
+    """Level of the steady idle that must end the capture, the lowest level of the capture."""
+    start = len(conversions.values) - 1
+    low = high = conversions.values[start]
+    while start > 0 and _fits_band(min(low, conversions.values[start - 1]), max(high, conversions.values[start - 1]), config):
+        start -= 1
+        low, high = min(low, conversions.values[start]), max(high, conversions.values[start])
+    first_sample = conversions.first_sample[start]
+    duration = times[-1] - times[first_sample]
+    idle = float(np.mean(currents[first_sample:][is_valid[first_sample:]])) if math.isfinite(high) else math.inf
+    lowest = float(np.min(conversions.values))
+    if duration < MIN_IDLE_S or idle - lowest > config.tolerance(lowest):
         raise InvalidCaptureError(
-            f"Capture must start with the device idle: need {MIN_IDLE_S} s of steady current from the "
-            f"start (plus half the {config.smoothing_window_s} s smoothing window), got "
-            f"{max(duration, 0.0):.2f} s from {times[0] - capture_start:.2f} s. Start the capture before the device "
-            f"moves; if it already does, the idle current fluctuates more than +/-{config.tolerance(float(level[0])) * 1000:.1f} mA "
-            "(raise abs_tolerance_a)."
+            f"Capture must end with the device idle: need {MIN_IDLE_S} s of steady current at the lowest level "
+            f"of the capture ({lowest:.4f} A), got {max(duration, 0.0):.2f} s at {idle:.4f} A. "
+            "Let the capture run until the device is back at idle (--auto does)."
         )
-    return float((integral[end - 1] - integral[0]) / duration)
+    return idle
 
 
-def _run_bounds(
-    times: np.ndarray,
-    currents: np.ndarray,
-    level: np.ndarray,
+def _fits_band(low: float, high: float, config: AnalysisConfig) -> bool:
+    return math.isfinite(high) and high - low <= 2.0 * config.tolerance((high + low) / 2.0)
+
+
+def _movement(
+    conversions: _Conversions,
     idle_level: float,
     config: AnalysisConfig,
-) -> tuple[int, int]:
-    """Valid-array bounds ``[start, end)`` of the single run above idle."""
-    threshold = idle_level + RUN_THRESHOLD_TOLERANCES * config.tolerance(idle_level)
-    runs = [
-        (start, end) for start, end in _merged_runs(times, level > threshold, config.smoothing_window_s)
-        if times[end - 1] - times[start] >= config.min_run_s
-        and _is_above_idle(currents[start:end], idle_level)
-    ]
-    if not runs:
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Conversion bounds ``[start, end)`` of the movement stretch and of its averaged conversions."""
+    floor = idle_level + RUN_THRESHOLD_TOLERANCES * config.tolerance(idle_level)
+    finite = conversions.values[np.isfinite(conversions.values)]
+    ceiling = idle_level + PEAK_THRESHOLD_FRACTION * (float(np.max(finite)) - idle_level)
+    is_candidate = (conversions.values > floor) & (conversions.values < ceiling)
+    movements = []
+    for run in _stretches(is_candidate):
+        kept = _trimmed(conversions, run, config)
+        if conversions.end_time[kept[1] - 1] - conversions.times[kept[0]] >= MIN_MOVEMENT_S:
+            movements.append((run, kept))
+    if not movements:
         raise SignalNotSettledError(
-            f"No run: the current never stayed above idle ({idle_level:.4f} A) by more than "
-            f"{threshold - idle_level:.4f} A for {config.min_run_s} s. Start the capture before the device moves."
+            f"No movement: no stretch of at least {MIN_MOVEMENT_S} s between idle ({idle_level:.4f} A, "
+            f"movement above {floor:.4f} A) and the peaks (from {ceiling:.4f} A). A movement shorter than "
+            "about 3 conversions needs a faster ADC rate (--rate MED)."
         )
-    if len(runs) > 1:
-        spans = ", ".join(f"{times[s]:.2f}-{times[e - 1]:.2f} s" for s, e in runs)
-        raise AmbiguousRunError(f"{len(runs)} separate runs ({spans}); expected one run per capture.")
-    start, end = runs[0]
-    above = np.flatnonzero(currents[start:end] > threshold)
-    return start + int(above[0]), start + int(above[-1]) + 1
+    if len(movements) > 1:
+        spans = ", ".join(f"{conversions.times[s]:.2f}-{conversions.end_time[e - 1]:.2f} s" for (s, e), _ in movements)
+        raise AmbiguousRunError(f"{len(movements)} separate movements ({spans}); expected one movement per capture.")
+    return movements[0]
 
 
-def _is_above_idle(readings: np.ndarray, idle_level: float) -> bool:
-    """True if the readings' mean exceeds idle beyond noise, not just by an idle fluctuation."""
-    return float(np.mean(readings)) - idle_level > RUN_SIGNIFICANCE_SIGMAS * _standard_error(readings)
-
-
-def _merged_runs(times: np.ndarray, mask: np.ndarray, max_gap_s: float) -> list[tuple[int, int]]:
-    """Contiguous True runs of *mask*, joining runs separated by less than *max_gap_s*."""
+def _stretches(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Bounds ``[start, end)`` of the runs of consecutive True values."""
     edges = np.flatnonzero(np.diff(np.concatenate(([0], mask.astype(np.int8), [0]))))
-    merged: list[tuple[int, int]] = []
-    for start, end in zip(edges[::2].tolist(), edges[1::2].tolist()):
-        if merged and times[start] - times[merged[-1][1] - 1] < max_gap_s:
-            merged[-1] = (merged[-1][0], end)
+    return list(zip(edges[::2].tolist(), edges[1::2].tolist()))
+
+
+def _trimmed(conversions: _Conversions, run: tuple[int, int], config: AnalysisConfig) -> tuple[int, int]:
+    """Drop edge conversions off the stretch's level: they straddle its start or stop."""
+    start, end = run
+    while end - start > 1:
+        level = _weighted_median(conversions, start, end)
+        deviations = [abs(conversions.values[start] - level), abs(conversions.values[end - 1] - level)]
+        if max(deviations) <= config.tolerance(level):
+            break
+        if deviations[0] >= deviations[1]:
+            start += 1
         else:
-            merged.append((start, end))
-    return merged
+            end -= 1
+    return start, end
 
 
-def _averaging_window(
-    times: np.ndarray,
-    integral: np.ndarray,
-    currents: np.ndarray,
-    original_index: np.ndarray,
-    run: tuple[int, int],
-    config: AnalysisConfig,
-) -> tuple[int, int]:
-    """Valid-array bounds of the least-trimmed steady, precise and complete window inside the run."""
-    best_uncertainty, has_invalid = math.inf, False
-    for first, last in _candidate_windows(times, run, config):
-        if original_index[last - 1] - original_index[first] + 1 != last - first:
-            has_invalid = True
-            continue
-        if not _is_steady(times, integral, currents, first, last, config):
-            continue
-        mean, uncertainty = _window_estimate(times, integral, currents, first, last, config)
-        if PRECISION_Z_SCORE * uncertainty <= config.tolerance(mean):
-            return first, last
-        best_uncertainty = min(best_uncertainty, uncertainty)
-    _raise_no_window(times, integral, run, best_uncertainty, has_invalid, config)
-
-
-def _candidate_windows(times: np.ndarray, run: tuple[int, int], config: AnalysisConfig):
-    """Windows inside the run, smallest total trim first, at least ``min_run_s`` long."""
-    trims = np.arange(0.0, config.max_settle_s + TRIM_STEP_S / 2.0, TRIM_STEP_S).tolist()
-    for head, tail in sorted(((h, t) for h in trims for t in trims), key=lambda pair: (sum(pair), pair[0])):
-        first = int(np.searchsorted(times, times[run[0]] + head, side="left"))
-        last = int(np.searchsorted(times, times[run[1] - 1] - tail, side="right"))
-        if last - first >= 2 and times[last - 1] - times[first] >= config.min_run_s:
-            yield first, last
-
-
-def _raise_no_window(
-    times: np.ndarray,
-    integral: np.ndarray,
-    run: tuple[int, int],
-    best_uncertainty: float,
-    has_invalid: bool,
-    config: AnalysisConfig,
-) -> None:
-    span = f"{times[run[0]]:.2f}-{times[run[1] - 1]:.2f} s"
-    if math.isfinite(best_uncertainty):
-        raise ImpreciseValueError(
-            f"Run {span} is steady but its mean is too uncertain: "
-            f"+/-{PRECISION_Z_SCORE * best_uncertainty * 1000:.1f} mA ({PRECISION_Z_SCORE:g} sigma) at best, "
-            f"tolerance {config.rel_tolerance:.0%}. Use a slower ADC rate, a longer run or a looser tolerance."
-        )
-    if has_invalid:
-        raise InvalidCaptureError(
-            f"Run {span} has invalid readings (overflow, NaN) that no start/end trim up to "
-            f"{config.max_settle_s} s excludes: missing peaks would bias the mean. Raise the DCI range."
-        )
-    raise SignalNotSettledError(_not_steady_message(times, integral, run[0], run[1], config))
-
-
-def _window_estimate(
-    times: np.ndarray,
-    integral: np.ndarray,
-    currents: np.ndarray,
-    first: int,
-    last: int,
-    config: AnalysisConfig,
-) -> tuple[float, float]:
-    """Time-weighted mean of a window and its standard error.
-
-    The error is the larger of the reading-based one and the spread of the
-    block means, which also captures correlated noise and slow loads.
-    """
-    edges = _block_edges(times, first, last, config)
-    block_means = _mean_between(times, integral, edges[:-1], edges[1:])
-    mean = float(_mean_between(times, integral, edges[0], edges[-1]))
-    spread = float(np.std(block_means, ddof=1)) / math.sqrt(len(block_means))
-    return mean, max(_standard_error(currents[first:last]), spread)
-
-
-def _block_edges(times: np.ndarray, first: int, last: int, config: AnalysisConfig) -> np.ndarray:
-    duration = times[last - 1] - times[first]
-    blocks = max(MIN_BLOCKS, int(duration // (BLOCK_SMOOTHING_WINDOWS * config.smoothing_window_s)))
-    return np.linspace(times[first], times[last - 1], blocks + 1)
-
-
-def _is_steady(
-    times: np.ndarray,
-    integral: np.ndarray,
-    currents: np.ndarray,
-    first: int,
-    last: int,
-    config: AnalysisConfig,
-) -> bool:
-    """True if every block mean matches the window mean within tolerance plus noise."""
-    edges = _block_edges(times, first, last, config)
-    means = _mean_between(times, integral, edges[:-1], edges[1:])
-    overall = float(_mean_between(times, integral, edges[0], edges[-1]))
-    bounds = np.searchsorted(times, edges)
-    noise = np.array([_standard_error(currents[lo:hi]) for lo, hi in zip(bounds[:-1], bounds[1:])])
-    return bool(np.all(np.abs(means - overall) <= config.tolerance(overall) + PRECISION_Z_SCORE * noise))
-
-
-def _standard_error(readings: np.ndarray) -> float:
-    """Standard error of the mean over readings, repeated polls counted once."""
-    if len(readings) < 2:
-        return 0.0
-    independent = 1 + int(np.count_nonzero(np.diff(readings)))
-    return float(np.std(readings)) / math.sqrt(independent)
+def _weighted_median(conversions: _Conversions, start: int, end: int) -> float:
+    """Median of the conversion values, each weighted by its duration."""
+    values = conversions.values[start:end]
+    durations = conversions.end_time[start:end] - conversions.times[start:end]
+    order = np.argsort(values, kind="stable")
+    cumulative = np.cumsum(durations[order])
+    return float(values[order][np.searchsorted(cumulative, cumulative[-1] / 2.0)])
 
 
 def _result(
     times: np.ndarray,
-    currents: np.ndarray,
-    integral: np.ndarray,
-    original_index: np.ndarray,
-    window: tuple[int, int],
+    conversions: _Conversions,
     run: tuple[int, int],
+    movement: tuple[int, int],
     idle_level: float,
     config: AnalysisConfig,
 ) -> AnalysisResult:
-    """Result for an averaging window that already passed the precision check."""
-    first, last = window
-    value, standard_error = _window_estimate(times, integral, currents, first, last, config)
+    """Mean and precision of the movement's conversions."""
+    first, last = movement
+    readings = conversions.values[first:last]
+    mean = float(np.mean(readings))
+    standard_error = float(np.std(readings, ddof=1)) / math.sqrt(len(readings)) if len(readings) > 1 else 0.0
+    if PRECISION_Z_SCORE * standard_error > config.tolerance(mean):
+        raise ImpreciseValueError(
+            f"Movement {conversions.times[first]:.2f}-{conversions.end_time[last - 1]:.2f} s is too scattered: "
+            f"{len(readings)} conversions, mean {mean:.4f} A +/-{PRECISION_Z_SCORE * standard_error * 1000:.1f} mA "
+            f"({PRECISION_Z_SCORE:g} sigma), tolerance {config.rel_tolerance:.0%}. "
+            "A short movement needs a faster ADC rate (--rate MED)."
+        )
     return AnalysisResult(
-        stable_value=value,
-        stable_std_dev=float(np.std(currents[first:last])),
+        stable_value=mean,
+        stable_std_dev=float(np.std(readings)),
         standard_error=standard_error,
-        start_time=float(times[first]),
-        end_time=float(times[last - 1]),
-        start_index=int(original_index[first]),
-        end_index=int(original_index[last - 1]) + 1,
+        start_time=float(conversions.times[first]),
+        end_time=float(times[conversions.end_sample[last - 1] - 1]),
+        start_index=int(conversions.first_sample[first]),
+        end_index=int(conversions.end_sample[last - 1]),
         samples_used=last - first,
         idle_level=idle_level,
-        run_start_time=float(times[run[0]]),
-        run_end_time=float(times[run[1] - 1]),
-    )
-
-
-def _not_steady_message(
-    times: np.ndarray,
-    integral: np.ndarray,
-    run_start: int,
-    run_end: int,
-    config: AnalysisConfig,
-) -> str:
-    edges = _block_edges(times, run_start, run_end, config)
-    means = ", ".join(f"{mean:.4f}" for mean in _mean_between(times, integral, edges[:-1], edges[1:]))
-    return (
-        f"Run {times[run_start]:.2f}-{times[run_end - 1]:.2f} s is not steady: trimming up to "
-        f"{config.max_settle_s} s at either end never makes its block means agree "
-        f"within +/-{config.rel_tolerance:.0%} (untrimmed blocks: {means} A). Drift, a second level "
-        "(hold, standby, another speed), or loads slower than a block."
+        run_start_time=float(conversions.times[run[0]]),
+        run_end_time=float(times[conversions.end_sample[run[1] - 1] - 1]),
     )

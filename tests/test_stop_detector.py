@@ -1,14 +1,11 @@
 """Tests for the auto-stop of a capture (stop_detector.py)."""
 
 import math
-from dataclasses import replace
 
-import numpy as np
 import pytest
 
 from analyzer import analyze_waveform
-from scenarios import SCENARIOS
-from simulation import InstrumentModel, simulate_capture
+from tests.lab_captures import load_lab_capture
 from stop_detector import StopDetector
 
 IDLE_A = 0.030
@@ -26,12 +23,12 @@ def _readings(levels: list[tuple[float, float]], end_s: float = 30.0) -> list[tu
     return readings
 
 
-def _stop_time(readings: list[tuple[float, float]]) -> float | None:
+def _stop_time(readings) -> float | None:
     """Time of the first reading at which the detector stops the capture, None if it never does."""
     detector = StopDetector()
     for time_s, value in readings:
-        if detector.should_stop(time_s, value):
-            return time_s
+        if detector.should_stop(float(time_s), float(value)):
+            return float(time_s)
     return None
 
 
@@ -61,18 +58,21 @@ def test_a_failed_reading_after_the_run_restarts_the_hold() -> None:
     assert _stop_time(readings) == 7.0
 
 
+def test_a_movement_longer_than_the_hold_does_not_stop_a_capture_started_during_the_peaks() -> None:
+    # Starts during a peak, dips to idle, then a 3.5 s movement 30 mA above idle, a peak, idle.
+    readings = _readings([(0.0, 0.300), (0.25, IDLE_A), (0.5, RUN_A), (1.5, 0.060), (5.0, RUN_A), (6.0, IDLE_A)])
+    # Last running reading at 5.75 s.
+    assert _stop_time(readings) == 8.75
+
+
+def test_stops_the_lab_capture_that_starts_during_the_deltastep() -> None:
+    # Recorded for 30 s; its last deltastep conversion is held until 7.03 s.
+    assert 9.9 <= _stop_time(zip(*load_lab_capture("2026-10-02_16-23-08_motor1"))) <= 10.2
+
+
 def test_an_auto_stopped_capture_gives_the_same_value_as_a_full_one() -> None:
-    scenario = SCENARIOS["nominal"]
-    capture = simulate_capture(
-        scenario.phases(replace(scenario.defaults, idle_after_s=6.0)), InstrumentModel(adc_rate="SLOW"), seed=0
-    )
-    detector = StopDetector()
-    stop = next(
-        index for index, (time_s, value) in enumerate(zip(capture.timestamps, capture.values))
-        if detector.should_stop(float(time_s), float(value))
-    )
-    assert capture.target_end_s + 3.0 <= capture.timestamps[stop] < capture.target_end_s + 3.5
-    stopped = analyze_waveform(capture.timestamps[:stop + 1], capture.values[:stop + 1])
-    full = analyze_waveform(capture.timestamps, capture.values)
-    assert stopped.stable_value == pytest.approx(full.stable_value, abs=1e-9)
-    assert np.isclose(stopped.stable_value, capture.expected_value, atol=0.002)
+    timestamps, values = load_lab_capture("2026-10-02_16-23-08_motor1")
+    stop = _stop_time(zip(timestamps, values))
+    kept = timestamps <= stop
+    stopped = analyze_waveform(timestamps[kept], values[kept])
+    assert stopped.stable_value == pytest.approx(analyze_waveform(timestamps, values).stable_value, abs=1e-9)

@@ -1,6 +1,6 @@
 # HMC8012 Measurement Layer
 
-Command-line tool for the Rohde & Schwarz HMC8012 digital multimeter, called by a host program (a VBA macro). Each call does one job, writes its outcome to `result.txt` next to the executable, and exits. Besides single readings, a capture (`--time` or `--auto`) records the supply current of a motor while it runs and reports its mean running current, handling the inrush peak and noise. With `--auto` the capture stops by itself once the motor has stopped. On request it also draws the capture, live in a compact window or saved as a page.
+Command-line tool for the Rohde & Schwarz HMC8012 digital multimeter, called by a host program (a VBA macro). Each call does one job, writes its outcome to `result.txt` next to the executable, and exits. Besides single readings, a capture (`--time` or `--auto`) records the supply current of the device and reports the mean current of the movement between its deltastep peaks, leaving out the peaks, the idle and the readings that straddle the movement's start and stop. With `--auto` the capture stops by itself once the motor has stopped. On request it also draws the capture, live in a compact window or saved as a page.
 
 Italian version: [README_ita.md](README_ita.md).
 
@@ -13,6 +13,7 @@ Italian version: [README_ita.md](README_ita.md).
 | `hmc.exe 192.168.0.2 range dci 2` | DC current, 2 A range, kept until changed |
 | `hmc.exe 192.168.0.2 dci --auto` | Capture that stops by itself 3 s after the motor stops (at most 30 s): start it, then move the motor |
 | `hmc.exe 192.168.0.2 dci --time 10` | Capture of exactly 10 s |
+| `hmc.exe 192.168.0.2 dci --auto --rate MED` | The same at 10 conversions per second, for movements under 1 s |
 | `hmc.exe 192.168.0.2 dci --auto --live` | Capture plotted live in a small window |
 | `hmc.exe --version` | Version of this executable |
 
@@ -38,7 +39,7 @@ On Windows, activate the environment with `venv\Scripts\activate`.
 | Command | What it does | `result.txt` |
 |-|-|-|
 | `<address> <function> [--delay S]` | One reading with the current settings, after an optional wait of S seconds | value or `ERR` |
-| `<address> <function> --time S [flags]` | Capture of S seconds; reports the mean running value. See [Capture](#capture) | value or `ERR` |
+| `<address> <function> --time S [flags]` | Capture of S seconds; reports the mean movement value. See [Capture](#capture) | value or `ERR` |
 | `<address> <function> --auto [flags]` | Capture that stops by itself once the motor is back at idle (at most 30 s). See [Capture](#capture) | value or `ERR` |
 | `<address> range <function> <value>` | Selects the function and its range; kept until the next `range` or `reset` | `OK` or `ERR` |
 | `<address> adc` | Reads the ADC rate of the active function | `SLOW`, `MED`, `FAST` or `ERR` |
@@ -48,17 +49,17 @@ On Windows, activate the environment with `venv\Scripts\activate`.
 
 ### Capture
 
-- Captures work for `dci`, `dcv`, `aci` and `acv`; the analysis is designed for the DC supply current of a motor (`dci`).
-- With `--auto`, the capture stops 3 s after the value is back at the idle level it started from, provided the motor ran for at least 0.5 s first. Pauses shorter than 3 s inside one movement do not stop it. If the motor never stops, the capture ends at 30 s.
+- Captures work for `dci`, `dcv`, `aci` and `acv`; the analysis is designed for the DC supply current of the device (`dci`), see [How the capture value is computed](#how-the-capture-value-is-computed).
+- With `--auto`, the capture stops 3 s after the value is back at idle, provided the device ran for at least 0.5 s first. Idle is the lowest reading so far, so the capture may start while the device is already moving. Pauses shorter than 3 s do not stop it. If the device never stops, the capture ends at 30 s.
 - `--timeout S` sets the capture deadline; it defaults to the capture length plus 10 s (40 s with `--auto`).
-- The capture always reads at the SLOW ADC rate. If the instrument is at another rate, capture switches to SLOW and restores the previous rate at the end, also when it fails, so later measurements keep their settings.
+- The capture reads at the SLOW ADC rate, or at the rate given with `--rate SLOW|MED|FAST`. If the instrument is at another rate, capture switches to it and restores the previous rate at the end, also when it fails, so later measurements keep their settings. MED (10 conversions per second) suits movements that last only a few SLOW conversions.
 - Set the range of the function with `range` first: capture refuses auto-range.
 
 Diagnostic flags of a capture, off by default, in any combination and order:
 
 | Flag | What it adds |
 |-|-|
-| `--live` | Draws the readings while the capture runs, in a compact window (about 1000x640). At the end it marks the run and the averaging window and shows the value or the error. The window stays open after `hmc.exe` exits, until you close it. |
+| `--live` | Draws the readings while the capture runs, in a compact window (about 1000x640). At the end it marks the movement and the averaged conversions and shows the value or the error. The window stays open after `hmc.exe` exits, until you close it. |
 | `--save-plot` | Writes the same plot to `capture_plot_<UTC date>.html` next to the executable: one file that opens offline with a double click, as a normal browser tab. Drag to zoom. |
 | `--save-samples` | Writes the raw readings to `capture_samples_<UTC date>.csv` next to the executable. |
 
@@ -139,33 +140,35 @@ Loop
 - `result.txt` is written in one step, so once it exists it is complete: line 1 is the value or `ERR`.
 - Parse numbers with `Val()`, which always expects a decimal point. `CDbl` follows the Windows locale and expects a comma on Italian systems.
 
-**One capture, one movement.** Start the capture at least 1 s before the motor moves (the analysis needs the idle current first). With `--time`, let the motor stop before the capture ends; with `--auto`, the capture waits for it.
+**One capture, one movement.** The capture may start during the deltastep peaks, but it must end with the device idle: with `--time`, let the device stop before the capture ends; with `--auto`, the capture waits for it.
 
 ## How the capture value is computed
 
-`result.txt` holds the **mean supply current over the run**, from the end of the start transient to the stop, in a capture shaped idle, start/inrush, run, stop, idle. Ripple, PWM and load variations during the run are part of the mean. The code is `analyzer.py` (`analyze_waveform`):
+`result.txt` holds the **mean current of the movement**: the level the device draws while moving, between two groups of deltastep peaks, in a capture shaped (idle), deltastep peaks, movement, deltastep peaks, idle. The code is `analyzer.py` (`analyze_waveform`):
 
 1. **Validate.** Timestamps must increase. NaN/inf readings and overflow sentinels (+/-9.9E37) are invalid; more than 20% invalid readings reject the capture.
-2. **Idle reference.** The capture must open with at least 0.25 s of steady idle current (plus half the 0.5 s smoothing window).
-3. **Run.** The run is where the time-weighted smoothed current sits above idle by more than two tolerances (the motor only adds current), with a mean above idle beyond its noise, for at least `min_run_s` (0.5 s). Two separate runs in one capture are rejected. The run edges are refined on the raw readings.
-4. **Averaging window.** The start and the end of the run are trimmed (each by up to `max_settle_s`, default 1 s, in 0.1 s steps, smallest trims first) to drop inrush, acceleration and deceleration. A window is accepted when it holds no invalid reading, its 1 s blocks agree on the mean within the tolerance (max(2 mA, 2% of the mean), plus reading noise), and the mean is precise: two standard errors, from the readings and from the spread of the block means, within the tolerance.
-5. **Result.** The time-weighted mean over the window: each reading weighs for the interval until the next reading, so uneven polling and repeated `READ?` answers do not bias it.
+2. **Conversions.** The HMC8012 answers `READ?` with its latest conversion, so consecutive equal readings are one conversion (about 5 per second at SLOW).
+3. **Idle.** The capture must end with at least 0.25 s of steady current at the lowest level of the capture.
+4. **Peaks.** Conversions above the midpoint between idle and the highest conversion are deltastep peaks; invalid readings count as peaks.
+5. **Movement.** Stretches of consecutive conversions above idle by more than two tolerances and below the peaks. At each end of a stretch, the conversions that do not match its level (within the tolerance, max(2 mA, 2%)) straddle the movement's start or stop and are left out. What remains must last at least 0.3 s, more than one SLOW conversion, and exactly one stretch may qualify.
+6. **Result.** The mean of the movement's conversions, if two standard errors are within the tolerance.
 
 **Errors instead of wrong numbers.** When no trustworthy value exists, `result.txt` gets `ERR`:
 
 | Error | Meaning | What to change |
 |-|-|-|
-| `InvalidCaptureError` | Malformed data, too many invalid readings, no steady idle at the start, or overflow/NaN readings inside the run | Start the capture before the motor moves; raise the DC current range if peaks overflow; raise `abs_tolerance_a` if the idle current itself fluctuates by more than 2 mA |
-| `SignalNotSettledError` | No run, or a run that is not steady: drift, settling longer than `max_settle_s`, a second level (hold, standby after the stop, another speed) | Capture one steady run; raise `max_settle_s` for slow settling |
-| `AmbiguousRunError` | More than one separate run in the capture | One movement per capture |
-| `ImpreciseValueError` | Steady run, but the mean is too uncertain (noise, slow load changes, few readings) | Longer run, or a looser tolerance |
+| `InvalidCaptureError` | Malformed data, too many invalid readings, or the capture does not end with steady idle at its lowest level | Let the capture run until the device is idle (`--auto` does); raise the range if the peaks overflow |
+| `SignalNotSettledError` | No movement of at least 0.3 s between idle and the peaks | For a movement of only 2-3 SLOW conversions use `--rate MED` |
+| `AmbiguousRunError` | More than one movement in the capture | One movement per capture |
+| `ImpreciseValueError` | Movement found, but its conversions scatter too much for its mean (few conversions, edges mixed with the peaks) | `--rate MED` for short movements |
 
 **Known limits.**
 
 - A periodic load whose period divides the 200 ms SLOW conversion period can alias if the ADC aperture is shorter than the conversion period (not stated in the manual). Fast ripple (stepper steps, driver PWM) is averaged within each conversion.
-- Loads that vary over tenths of a second give few distinct readings at 5 per second and often end in `ImpreciseValueError`; a longer run helps.
-- A different level shorter than about `max_settle_s` at the start or end of the run is trimmed away as if it were a transient.
-- A pause inside one movement (current back at idle, then running again) ends in `ERR`. With `--auto`, a pause of 3 s or more also ends the capture.
+- At SLOW a movement of 0.6 s has 3 conversions, and the ones at its ends mix with the peaks: of the four lab captures of motor 2, one gives a value and three end in `ERR`. `--rate MED` doubles the conversions.
+- The deltastep peaks must be in the capture: they set the upper limit of the movement. Without them the movement itself counts as peaks and the capture ends in `SignalNotSettledError`.
+- A movement less than two tolerances above idle (about 7 mA at 167 mA) is not told apart from idle.
+- A pause inside the movement (current back at idle) splits it in two: if both parts last at least 0.3 s, the capture ends in `AmbiguousRunError`. With `--auto`, a pause of 3 s or more also ends the capture.
 - `dcv`, `aci` and `acv` captures use the same analysis as the DC current: they work only when the value rises while the motor runs, the minimum tolerance stays 0.002 in the unit of the function, and the error messages speak of current. The `FUNC?` replies of the AC functions (`CURR:AC`, `VOLT:AC`) are not verified on the instrument; a different reply stops the capture with `instrument config`.
 
 ## Developer guide
@@ -177,7 +180,7 @@ flowchart LR
     CLI["measure.py<br/>CLI, result.txt"] --> DRV["hmc8012.py<br/>SCPI driver"]
     CLI --> CAP["capture.py<br/>polling loop"]
     CAP --> DRV
-    CLI --> ANA["analyzer.py<br/>running mean"]
+    CLI --> ANA["analyzer.py<br/>movement mean"]
     CLI --> PLOT["capture_plot.py<br/>plot page (uPlot)"]
     CLI --> LIVE["live_plot.py<br/>live page server"]
     LIVE --> PLOT
@@ -189,7 +192,7 @@ flowchart LR
 
 What a capture (`--time` or `--auto`) does:
 
-1. `measure.py` opens the instrument (`hmc8012.py`), selects the function and switches to SLOW if needed.
+1. `measure.py` opens the instrument (`hmc8012.py`), selects the function and switches to the capture ADC rate if needed.
 2. `capture.py` polls `READ?` until the `--time` ends or, with `--auto`, until `stop_detector.py` sees the motor back at idle. Failed readings stay as NaN; five in a row stop the capture.
 3. The previous ADC rate is restored.
 4. `analyzer.py` computes the value and `measure.py` writes `result.txt`.
@@ -202,12 +205,12 @@ With `--live`, each reading also goes to `live_plot.py`, which streams it to the
 | `hmc8012.py` | SCPI over PyVISA (LAN socket or COM); every setter checks `SYST:ERR?` | `HMC8012`, `ScpiError`, `RangeOverflowError` |
 | `capture.py` | Timed polling loop, failure counting | `ContinuousCapture`, `CaptureResult` |
 | `stop_detector.py` | Auto-stop: ends an `--auto` capture once the motor has run and is back at idle | `StopDetector` |
-| `analyzer.py` | Idle, run, averaging window, precision; raises instead of guessing | `analyze_waveform`, `AnalysisConfig`, `AnalysisResult`, error classes |
+| `analyzer.py` | Idle, peaks, movement, precision; raises instead of guessing | `analyze_waveform`, `AnalysisConfig`, `AnalysisResult`, error classes |
 | `capture_plot.py` | Plot page of a capture (saved or live), from `plot_assets/` | `render_capture_plot`, `write_capture_plot`, `render_live_page` |
 | `live_plot.py` | Serves the live page on `127.0.0.1` and streams the readings | `LivePlot` |
 | `live_window.py` | Native live window in a child process (`hmc.exe --live-window <url>`, internal) | `open_live_window`, `run_live_window` |
-| `simulation.py` | Test bench: true motor current and HMC8012 sampling model | `Phase`, `InstrumentModel`, `simulate_capture` |
-| `scenarios.py` | Test bench: named device behaviours | `SCENARIOS`, `ScenarioParams` |
+| `simulation.py` | Test bench: true device current and HMC8012 sampling model | `Phase`, `InstrumentModel`, `simulate_capture` |
+| `scenarios.py` | Test bench: device behaviours modelled on the lab captures | `SCENARIOS`, `ScenarioParams` |
 | `version.py` | Single source of the release version | `__version__` |
 | `plot_assets/` | Page template and uPlot 1.6.32 (MIT), bundled into `hmc.exe` | |
 
@@ -217,8 +220,9 @@ Docstrings in each module are the reference for arguments, returns and raised er
 
 | To change | Edit |
 |-|-|
-| Analysis tuning (smoothing window, minimum run, trims, tolerance) | `AnalysisConfig` defaults in `analyzer.py` |
-| ADC rate of captures | `CAPTURE_ADC_RATE` in `measure.py` |
+| Analysis tolerance | `AnalysisConfig` defaults in `analyzer.py` |
+| Movement detection (peak threshold, shortest movement, idle at the end) | `PEAK_THRESHOLD_FRACTION`, `MIN_MOVEMENT_S`, `MIN_IDLE_S` in `analyzer.py` |
+| Default ADC rate of captures | `CAPTURE_ADC_RATE` in `measure.py` |
 | Functions a capture supports | `CAPTURE_FUNCTION_REPLIES` in `capture.py` |
 | Failed readings that stop a capture | `DEFAULT_MAX_CONSECUTIVE_FAILURES` in `capture.py` |
 | Idle time that ends an `--auto` capture | `STOP_HOLD_S` in `stop_detector.py` |
@@ -233,17 +237,17 @@ Docstrings in each module are the reference for arguments, returns and raised er
 
 `python -m pytest -q` runs the whole suite, including tests that wait for a connection timeout on an unreachable address.
 
-- The analyzer is tested against the physical simulation (`simulation.py`, `scenarios.py`: idle, inrush, step ripple, PWM load, hold current, slow settling, aliasing, at each ADC rate) and against hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value.
+- The analyzer is tested against the lab captures (`tests/data/lab`: the real device at SLOW), the physical simulation (`simulation.py`, `scenarios.py`: the same pattern at each ADC rate) and hand-built edge cases. The rule the tests enforce: a capture yields the right value or an explicit error, never a wrong value.
 - The plot tests cover the page content and the live stream over a real loopback connection.
 - The CI build checks that the compiled live window process starts a WebView2 window. How the window looks can only be checked on a Windows PC.
 
 ### Design decisions
 
-- **Mean of the whole run.** With ripple or variable load the useful number is the average consumption while running, not the flattest stretch.
-- **An error is better than a wrong number.** Every check (idle at start, one run, steady blocks, precision, no invalid reading in the window) rejects the capture with a reason instead of returning a value that may be wrong.
-- **Always SLOW, without side effects.** SLOW is the only rate with specified accuracy and averages the stepper ripple within each conversion; capture restores the previous rate so instantaneous readings keep their settings.
-- **Time-weighted, each reading held until the next.** The HMC8012 answers `READ?` with its latest conversion, so polling faster than the ADC repeats values; weighting by time makes the result independent of the polling rate.
-- **Failed readings are kept as NaN.** Dropping them would hide overflowing peaks and bias the mean low.
+- **Movement only.** The deltastep peaks are another consumer and idle is not the movement: only the level between them counts. The conversions at the movement's ends are left out because each one averages the movement with what came before or after it.
+- **An error is better than a wrong number.** Every check (idle at the end, one movement, at least 0.3 s, precision) rejects the capture with a reason instead of returning a value that may be wrong.
+- **SLOW by default, without side effects.** SLOW is the only rate with specified accuracy and averages the stepper ripple within each conversion; `--rate MED` trades that for twice the conversions on short movements. The capture restores the previous rate, so single readings keep their settings.
+- **One conversion, one value.** The HMC8012 answers `READ?` with its latest conversion, so polling faster than the ADC repeats values; the analysis merges them, so the result does not depend on the polling rate.
+- **Failed readings are kept as NaN and count as peaks.** A missing reading next to the movement is never taken for part of it.
 - **Diagnostic outputs never change the outcome.** Plot, live window and samples file get the readings and the outcome, also of a failed capture, but `result.txt` never waits for them or depends on them.
 
 ### Instrument notes
@@ -287,7 +291,7 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
   --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
   --noinclude-pytest-mode=nofollow ^
   --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
-  --file-version=4.0.0 --product-version=4.0.0 ^
+  --file-version=4.1.0 --product-version=4.1.0 ^
   measure.py
 ```
 
