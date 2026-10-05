@@ -139,8 +139,8 @@ def _analysis_facts(analysis: AnalysisResult) -> list[tuple[str, str]]:
     return [
         ("result.txt", str(analysis.stable_value)),
         ("Finestra di media", f"da {analysis.start_time:.2f} s a {analysis.end_time:.2f} s, "
-                              f"{analysis.samples_used} letture"),
-        ("Regime", f"da {analysis.run_start_time:.2f} s a {analysis.run_end_time:.2f} s"),
+                              f"{analysis.samples_used} conversioni"),
+        ("Movimento", f"da {analysis.run_start_time:.2f} s a {analysis.run_end_time:.2f} s"),
         ("Riposo", _format_milliamps(analysis.idle_level)),
         ("Incertezza (1σ)", _format_milliamps(analysis.standard_error)),
     ]

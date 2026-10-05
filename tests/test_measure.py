@@ -174,6 +174,14 @@ def test_capture_reads_at_slow_and_restores_the_previous_rate(monkeypatch, previ
     assert dmm.adc_rate == previous_rate
 
 
+def test_capture_reads_at_the_requested_rate_and_restores_the_previous_one(monkeypatch) -> None:
+    dmm = _use_fake(monkeypatch, _FakeDmm(adc_rate="SLOW"))
+    with pytest.raises(AnalysisError):
+        measure_module._run_capture_session("192.0.2.1", 0.3, 5.0, adc_rate="MED")
+    assert set(dmm.rates_during_readings) == {"MED"}
+    assert dmm.adc_rate == "SLOW"
+
+
 def test_capture_does_not_touch_an_instrument_already_at_slow(monkeypatch) -> None:
     dmm = _use_fake(monkeypatch, _FakeDmm(adc_rate="SLOW"))
     with pytest.raises(AnalysisError):
@@ -220,12 +228,14 @@ def test_saved_samples_survive_a_failed_capture(tmp_path: Path, monkeypatch, dmm
     ([], (0.0, None)),
     (["--delay", "1.5"], (1.5, None)),
     (['""'], (0.0, None)),
-    (["--time", "5"], (0.0, (5.0, 15.0, False, False, False, False))),
-    (["--time", "5", "--timeout", "8"], (0.0, (5.0, 8.0, False, False, False, False))),
-    (["--auto"], (0.0, (30.0, 40.0, False, False, False, True))),
-    (["--save-samples", "--time", "5"], (0.0, (5.0, 15.0, True, False, False, False))),
-    (["--time", "5", "--save-plot"], (0.0, (5.0, 15.0, False, True, False, False))),
-    (["--live", "--auto", "--save-plot", "--save-samples"], (0.0, (30.0, 40.0, True, True, True, True))),
+    (["--time", "5"], (0.0, (5.0, 15.0, False, False, False, False, "SLOW"))),
+    (["--time", "5", "--timeout", "8"], (0.0, (5.0, 8.0, False, False, False, False, "SLOW"))),
+    (["--auto"], (0.0, (30.0, 40.0, False, False, False, True, "SLOW"))),
+    (["--auto", "--rate", "med"], (0.0, (30.0, 40.0, False, False, False, True, "MED"))),
+    (["--rate", "FAST", "--time", "5"], (0.0, (5.0, 15.0, False, False, False, False, "FAST"))),
+    (["--save-samples", "--time", "5"], (0.0, (5.0, 15.0, True, False, False, False, "SLOW"))),
+    (["--time", "5", "--save-plot"], (0.0, (5.0, 15.0, False, True, False, False, "SLOW"))),
+    (["--live", "--auto", "--save-plot", "--save-samples"], (0.0, (30.0, 40.0, True, True, True, True, "SLOW"))),
 ])
 def test_measure_arguments_select_a_reading_or_a_capture(args, expected) -> None:
     assert measure_module._parse_measure_args("dci", args) == expected
@@ -242,6 +252,8 @@ def test_measure_arguments_select_a_reading_or_a_capture(args, expected) -> None
     ("dci", ["5"]),
     ("dci", ["--bogus"]),
     ("res", ["--auto"]),
+    ("dci", ["--rate", "MED"]),
+    ("dci", ["--auto", "--rate", "TURBO"]),
 ])
 def test_invalid_measure_arguments_are_a_usage_error(monkeypatch, function, args) -> None:
     written = []
@@ -281,15 +293,15 @@ def test_only_an_auto_stop_capture_ends_when_the_device_is_back_at_idle(monkeypa
 
 
 @pytest.mark.parametrize("args, session", [
-    (["dci", "--auto"], ("dci", 30.0, True)),
-    (["dci", "--time", "10"], ("dci", 10.0, False)),
-    (["dcv", "--auto"], ("dcv", 30.0, True)),
+    (["dci", "--auto"], ("dci", 30.0, True, "SLOW")),
+    (["dci", "--time", "10"], ("dci", 10.0, False, "SLOW")),
+    (["dcv", "--auto", "--rate", "MED"], ("dcv", 30.0, True, "MED")),
 ])
 def test_time_and_auto_capture_the_function_given(monkeypatch, args, session) -> None:
     sessions = []
 
     def fake_session(address, duration, timeout, **kwargs):
-        sessions.append((kwargs["function"], duration, kwargs["stop_on_idle"]))
+        sessions.append((kwargs["function"], duration, kwargs["stop_on_idle"], kwargs["adc_rate"]))
         raise AnalysisError("stop here")
 
     monkeypatch.setattr(measure_module, "_run_capture_session", fake_session)

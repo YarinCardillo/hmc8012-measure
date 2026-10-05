@@ -1,6 +1,6 @@
 # HMC8012 Measurement Layer
 
-Strumento a riga di comando per il multimetro digitale Rohde & Schwarz HMC8012, pensato per essere lanciato da un programma host (una macro VBA). A ogni chiamata esegue un solo comando, scrive l'esito in `result.txt` nella cartella dell'eseguibile e termina. Oltre alle letture singole, la cattura (`--time` o `--auto`) registra la corrente assorbita da un motore durante il movimento e ne restituisce la corrente media a regime, escludendo il picco di spunto e filtrando il rumore. Con `--auto` la cattura si ferma da sola quando il motore si è fermato. Su richiesta mostra anche il grafico della cattura, in tempo reale in una piccola finestra oppure salvato in un file HTML.
+Strumento a riga di comando per il multimetro digitale Rohde & Schwarz HMC8012, pensato per essere lanciato da un programma host (una macro VBA). A ogni chiamata esegue un solo comando, scrive l'esito in `result.txt` nella cartella dell'eseguibile e termina. Oltre alle letture singole, la cattura (`--time` o `--auto`) registra la corrente assorbita dal dispositivo e restituisce la corrente media del movimento compreso tra i picchi del deltastep, escludendo i picchi, il riposo e le letture a cavallo dell'inizio e della fine del movimento. Con `--auto` la cattura si ferma da sola quando il dispositivo si è fermato. Su richiesta mostra anche il grafico della cattura, in tempo reale in una piccola finestra oppure salvato in un file HTML.
 
 English version: [README.md](README.md).
 
@@ -13,6 +13,7 @@ English version: [README.md](README.md).
 | `hmc.exe 192.168.0.2 range dci 2` | Imposta la corrente DC con fondo scala 2 A, che resta attivo finché non lo si cambia |
 | `hmc.exe 192.168.0.2 dci --auto` | Cattura che si ferma da sola 3 s dopo l'arresto del motore (al massimo 30 s): avviala, poi muovi il motore |
 | `hmc.exe 192.168.0.2 dci --time 10` | Cattura di 10 s esatti |
+| `hmc.exe 192.168.0.2 dci --auto --rate MED` | Come sopra, con 10 conversioni al secondo, per movimenti sotto il secondo |
 | `hmc.exe 192.168.0.2 dci --auto --live` | Cattura con il grafico in tempo reale in una piccola finestra |
 | `hmc.exe --version` | Versione di questo eseguibile |
 
@@ -38,7 +39,7 @@ Su Windows l'ambiente si attiva con `venv\Scripts\activate`.
 | Comando | Cosa fa | `result.txt` |
 |-|-|-|
 | `<indirizzo> <funzione> [--delay S]` | Una lettura con le impostazioni correnti, dopo un'attesa opzionale di S secondi | valore o `ERR` |
-| `<indirizzo> <funzione> --time S [opzioni]` | Cattura di S secondi; restituisce il valore medio a regime. Vedi [Cattura](#cattura) | valore o `ERR` |
+| `<indirizzo> <funzione> --time S [opzioni]` | Cattura di S secondi; restituisce il valore medio del movimento. Vedi [Cattura](#cattura) | valore o `ERR` |
 | `<indirizzo> <funzione> --auto [opzioni]` | Cattura che si ferma da sola quando il motore torna a riposo (al massimo 30 s). Vedi [Cattura](#cattura) | valore o `ERR` |
 | `<indirizzo> range <funzione> <valore>` | Seleziona la funzione e il fondo scala; restano fino al prossimo `range` o `reset` | `OK` o `ERR` |
 | `<indirizzo> adc` | Legge l'ADC rate della funzione attiva | `SLOW`, `MED`, `FAST` o `ERR` |
@@ -48,17 +49,17 @@ Su Windows l'ambiente si attiva con `venv\Scripts\activate`.
 
 ### Cattura
 
-- La cattura funziona con `dci`, `dcv`, `aci` e `acv`; l'analisi è pensata per la corrente DC assorbita da un motore (`dci`).
-- Con `--auto` la cattura si ferma 3 s dopo che il valore è tornato al livello di riposo iniziale, purché prima il motore abbia girato per almeno 0.5 s. Le pause più brevi di 3 s dentro un movimento non la fermano. Se il motore non si ferma mai, la cattura termina a 30 s.
+- La cattura funziona con `dci`, `dcv`, `aci` e `acv`; l'analisi è pensata per la corrente DC assorbita dal dispositivo (`dci`), vedi [Come si calcola il valore della cattura](#come-si-calcola-il-valore-della-cattura).
+- Con `--auto` la cattura si ferma 3 s dopo che il valore è tornato a riposo, purché prima il dispositivo sia stato in funzione per almeno 0.5 s. Il riposo è la lettura più bassa vista fino a quel momento, quindi la cattura può partire anche con il dispositivo già in movimento. Le pause più brevi di 3 s non la fermano. Se il dispositivo non si ferma mai, la cattura termina a 30 s.
 - `--timeout S` imposta la scadenza della cattura; di default vale la durata della cattura più 10 s (40 s con `--auto`).
-- La cattura legge sempre con ADC rate SLOW. Se lo strumento è a un altro rate, passa a SLOW e alla fine ripristina il rate precedente, anche se la cattura fallisce, così le misure successive mantengono le loro impostazioni.
+- La cattura legge con ADC rate SLOW, oppure con quello indicato da `--rate SLOW|MED|FAST`. Se lo strumento è a un altro rate, lo cambia e alla fine ripristina quello precedente, anche se la cattura fallisce, così le misure successive mantengono le loro impostazioni. MED (10 conversioni al secondo) serve per i movimenti che durano poche conversioni SLOW.
 - Impostare prima il fondo scala della funzione con `range`: la cattura rifiuta l'autorange.
 
 Opzioni di diagnostica della cattura, disattivate di default, combinabili tra loro e in qualsiasi ordine:
 
 | Opzione | Cosa aggiunge |
 |-|-|
-| `--live` | Mostra in tempo reale il grafico delle letture durante la cattura, in una piccola finestra (circa 1000x640). Alla fine evidenzia il tratto a regime e l'intervallo usato per la media, e mostra il valore o l'errore. La finestra resta aperta anche dopo la chiusura di `hmc.exe`, finché non la chiudi tu. |
+| `--live` | Mostra in tempo reale il grafico delle letture durante la cattura, in una piccola finestra (circa 1000x640). Alla fine evidenzia il movimento e le conversioni usate per la media, e mostra il valore o l'errore. La finestra resta aperta anche dopo la chiusura di `hmc.exe`, finché non la chiudi tu. |
 | `--save-plot` | Salva lo stesso grafico in `capture_plot_<data UTC>.html` nella cartella dell'eseguibile: un file unico che si apre con un doppio clic nel browser, anche senza rete. Per ingrandire, trascina sul grafico. |
 | `--save-samples` | Salva le letture grezze in `capture_samples_<data UTC>.csv` nella cartella dell'eseguibile. |
 
@@ -139,33 +140,35 @@ Loop
 - `result.txt` viene scritto in un solo passaggio, quindi quando esiste è completo: la riga 1 è il valore oppure `ERR`.
 - Leggere i numeri con `Val()`, che usa sempre il punto decimale. `CDbl` segue le impostazioni di Windows e in italiano si aspetta la virgola.
 
-**Una cattura per ogni movimento.** Avviare la cattura almeno 1 s prima che il motore si muova (l'analisi deve prima misurare la corrente di riposo). Con `--time` il motore deve fermarsi prima della fine della cattura; con `--auto` è la cattura ad aspettarlo.
+**Una cattura per ogni movimento.** La cattura può partire durante i picchi del deltastep, ma deve finire con il dispositivo a riposo: con `--time` il dispositivo deve fermarsi prima della fine della cattura; con `--auto` è la cattura ad aspettarlo.
 
 ## Come si calcola il valore della cattura
 
-`result.txt` contiene la **corrente media assorbita durante il funzionamento a regime**, dalla fine del transitorio di avvio fino all'arresto, in una cattura che segue la sequenza riposo, avvio (spunto), regime, arresto, riposo. Ripple, PWM e variazioni di carico durante il regime fanno parte della media. Il codice è in `analyzer.py` (`analyze_waveform`):
+`result.txt` contiene la **corrente media del movimento**: il livello che il dispositivo assorbe mentre si muove, tra due gruppi di picchi del deltastep, in una cattura che segue la sequenza (riposo), picchi del deltastep, movimento, picchi del deltastep, riposo. Il codice è in `analyzer.py` (`analyze_waveform`):
 
 1. **Validazione.** I timestamp devono essere crescenti. Le letture NaN/inf e i valori di overflow (+/-9.9E37) sono considerati non validi; se superano il 20% delle letture, la cattura viene scartata.
-2. **Riferimento di riposo.** La cattura deve iniziare con almeno 0.25 s di corrente di riposo stabile (più metà della finestra di smoothing da 0.5 s).
-3. **Regime.** Il regime è il tratto in cui la corrente filtrata (media mobile pesata nel tempo) supera il riposo di più di due tolleranze (il motore può solo aggiungere corrente) e la sua media supera il riposo più del rumore, per almeno `min_run_s` (0.5 s). Due regimi separati nella stessa cattura la fanno scartare. Gli estremi del regime vengono poi affinati sulle letture grezze.
-4. **Finestra di media.** L'inizio e la fine del regime vengono tagliati (ciascuno fino a `max_settle_s`, default 1 s, a passi di 0.1 s, prima i tagli più piccoli) per escludere spunto, accelerazione e decelerazione. Una finestra è accettata se non contiene letture non valide, se le medie dei suoi blocchi da 1 s coincidono entro la tolleranza (max(2 mA, 2% della media), più il rumore delle letture) e se la media è abbastanza precisa: due errori standard, calcolati dalle letture e dalla dispersione delle medie dei blocchi, devono stare entro la tolleranza.
-5. **Risultato.** La media pesata nel tempo sulla finestra: ogni lettura conta per il tempo che passa fino alla successiva, quindi interrogazioni a intervalli irregolari e risposte `READ?` ripetute non la falsano.
+2. **Conversioni.** L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi più letture uguali consecutive sono una sola conversione (circa 5 al secondo in SLOW).
+3. **Riposo.** La cattura deve finire con almeno 0.25 s di corrente stabile, al livello più basso della cattura.
+4. **Picchi.** Le conversioni sopra la metà tra il riposo e la conversione più alta sono picchi del deltastep; le letture non valide contano come picchi.
+5. **Movimento.** I tratti di conversioni consecutive che superano il riposo di più di due tolleranze e restano sotto i picchi. A ciascun estremo di un tratto, le conversioni che non corrispondono al suo livello (entro la tolleranza, max(2 mA, 2%)) sono a cavallo dell'inizio o della fine del movimento e vengono escluse. Quello che resta deve durare almeno 0.3 s, cioè più di una conversione SLOW, e un solo tratto può soddisfare questa condizione.
+6. **Risultato.** La media delle conversioni del movimento, se due errori standard stanno entro la tolleranza.
 
 **Un errore, mai un numero sbagliato.** Se non c'è un valore affidabile, in `result.txt` viene scritto `ERR`:
 
 | Errore | Significato | Cosa cambiare |
 |-|-|-|
-| `InvalidCaptureError` | Dati malformati, troppe letture non valide, nessun riposo stabile all'inizio, o letture in overflow/NaN durante il regime | Avviare la cattura prima che il motore si muova; alzare il fondo scala se i picchi vanno in overflow; alzare `abs_tolerance_a` se la corrente di riposo stessa fluttua di più di 2 mA |
-| `SignalNotSettledError` | Nessun regime, o regime non stabile: deriva, assestamento più lungo di `max_settle_s`, un secondo livello (mantenimento, standby dopo lo stop, altra velocità) | Catturare un solo regime stabile; aumentare `max_settle_s` per assestamenti lenti |
-| `AmbiguousRunError` | Più di un regime separato nella cattura | Un movimento per cattura |
-| `ImpreciseValueError` | Regime stabile, ma media troppo incerta (rumore, variazioni lente del carico, poche letture) | Regime più lungo, o tolleranza più larga |
+| `InvalidCaptureError` | Dati malformati, troppe letture non valide, oppure la cattura non finisce con un riposo stabile al suo livello più basso | Lasciare andare la cattura finché il dispositivo è a riposo (`--auto` lo fa da sé); alzare il fondo scala se i picchi vanno in overflow |
+| `SignalNotSettledError` | Nessun movimento di almeno 0.3 s tra il riposo e i picchi | Per un movimento di sole 2-3 conversioni SLOW usare `--rate MED` |
+| `AmbiguousRunError` | Più di un movimento nella cattura | Un movimento per cattura |
+| `ImpreciseValueError` | Movimento trovato, ma le sue conversioni sono troppo disperse per la media (poche conversioni, estremi mescolati ai picchi) | `--rate MED` per i movimenti brevi |
 
 **Limiti noti.**
 
 - Un carico periodico con periodo sottomultiplo dei 200 ms di conversione in SLOW può dare aliasing se l'apertura dell'ADC è più corta del periodo di conversione (non indicato nel manuale). Il ripple veloce (passi dello stepper, PWM del driver) si media dentro ogni conversione.
-- Carichi che variano nell'arco di decimi di secondo producono poche letture distinte (5 al secondo) e finiscono spesso in `ImpreciseValueError`; un regime più lungo aiuta.
-- Un livello diverso più breve di circa `max_settle_s` all'inizio o alla fine del regime viene tagliato come se fosse un transitorio.
-- Una pausa dentro un movimento (la corrente torna a riposo e poi riparte) dà `ERR`. Con `--auto`, una pausa di 3 s o più chiude anche la cattura.
+- In SLOW un movimento di 0.6 s ha 3 conversioni, e quelle agli estremi si mescolano ai picchi: delle quattro catture di laboratorio del motore 2, una dà un valore e tre danno `ERR`. `--rate MED` raddoppia le conversioni.
+- I picchi del deltastep devono essere nella cattura, perché fissano il limite superiore del movimento. Senza picchi il movimento stesso viene preso per un picco e la cattura dà `SignalNotSettledError`.
+- Un movimento che supera il riposo di meno di due tolleranze (circa 7 mA a 167 mA) non si distingue dal riposo.
+- Una pausa dentro il movimento (la corrente torna a riposo) lo divide in due: se entrambe le parti durano almeno 0.3 s, la cattura dà `AmbiguousRunError`. Con `--auto`, una pausa di 3 s o più chiude anche la cattura.
 - Le catture di `dcv`, `aci` e `acv` usano la stessa analisi della corrente DC: funzionano solo se il valore sale mentre il motore gira, la tolleranza minima resta 0.002 nell'unità della funzione e i messaggi di errore parlano di corrente. Le risposte `FUNC?` delle funzioni AC (`CURR:AC`, `VOLT:AC`) non sono verificate sullo strumento; se lo strumento risponde in un altro modo, la cattura si ferma con `instrument config`.
 
 ## Guida per sviluppatori
@@ -177,7 +180,7 @@ flowchart LR
     CLI["measure.py<br/>CLI, result.txt"] --> DRV["hmc8012.py<br/>driver SCPI"]
     CLI --> CAP["capture.py<br/>loop di lettura"]
     CAP --> DRV
-    CLI --> ANA["analyzer.py<br/>media di regime"]
+    CLI --> ANA["analyzer.py<br/>media del movimento"]
     CLI --> PLOT["capture_plot.py<br/>pagina del grafico (uPlot)"]
     CLI --> LIVE["live_plot.py<br/>server della pagina live"]
     LIVE --> PLOT
@@ -189,8 +192,8 @@ flowchart LR
 
 Cosa fa una cattura (`--time` o `--auto`):
 
-1. `measure.py` apre lo strumento (`hmc8012.py`), seleziona la funzione e passa a SLOW se serve.
-2. `capture.py` interroga `READ?` fino alla fine di `--time` oppure, con `--auto`, finché `stop_detector.py` non vede il motore di nuovo a riposo. Le letture fallite restano NaN; cinque di fila fermano la cattura.
+1. `measure.py` apre lo strumento (`hmc8012.py`), seleziona la funzione e imposta l'ADC rate della cattura se serve.
+2. `capture.py` interroga `READ?` fino alla fine di `--time` oppure, con `--auto`, finché `stop_detector.py` non vede il dispositivo di nuovo a riposo. Le letture fallite restano NaN; cinque di fila fermano la cattura.
 3. Il rate precedente viene ripristinato.
 4. `analyzer.py` calcola il valore e `measure.py` scrive `result.txt`.
 
@@ -202,12 +205,12 @@ Con `--live` ogni lettura va anche a `live_plot.py`, che la invia alla pagina co
 | `hmc8012.py` | SCPI via PyVISA (socket LAN o COM); ogni setter controlla `SYST:ERR?` | `HMC8012`, `ScpiError`, `RangeOverflowError` |
 | `capture.py` | Ciclo di lettura temporizzato, conteggio delle letture fallite | `ContinuousCapture`, `CaptureResult` |
 | `stop_detector.py` | Stop automatico: chiude una cattura `--auto` quando il motore ha girato ed è tornato a riposo | `StopDetector` |
-| `analyzer.py` | Riposo, regime, finestra di media, precisione; nel dubbio solleva un errore invece di restituire un valore | `analyze_waveform`, `AnalysisConfig`, `AnalysisResult`, classi di errore |
+| `analyzer.py` | Riposo, picchi, movimento, precisione; nel dubbio solleva un errore invece di restituire un valore | `analyze_waveform`, `AnalysisConfig`, `AnalysisResult`, classi di errore |
 | `capture_plot.py` | Pagina del grafico di una cattura (salvata o live), da `plot_assets/` | `render_capture_plot`, `write_capture_plot`, `render_live_page` |
 | `live_plot.py` | Serve la pagina live su `127.0.0.1` e invia le letture | `LivePlot` |
 | `live_window.py` | Finestra live nativa in un processo figlio (`hmc.exe --live-window <url>`, interno) | `open_live_window`, `run_live_window` |
-| `simulation.py` | Simulatore: corrente reale del motore e modello di campionamento dell'HMC8012 | `Phase`, `InstrumentModel`, `simulate_capture` |
-| `scenarios.py` | Simulatore: scenari di comportamento del dispositivo | `SCENARIOS`, `ScenarioParams` |
+| `simulation.py` | Simulatore: corrente reale del dispositivo e modello di campionamento dell'HMC8012 | `Phase`, `InstrumentModel`, `simulate_capture` |
+| `scenarios.py` | Simulatore: scenari del dispositivo ricavati dalle catture di laboratorio | `SCENARIOS`, `ScenarioParams` |
 | `version.py` | Unico punto in cui è definita la versione | `__version__` |
 | `plot_assets/` | Template della pagina e uPlot 1.6.32 (MIT), inclusi in `hmc.exe` | |
 
@@ -217,8 +220,9 @@ Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti
 
 | Per cambiare | Modificare |
 |-|-|
-| Taratura dell'analisi (finestra di smoothing, regime minimo, tagli, tolleranza) | valori di default di `AnalysisConfig` in `analyzer.py` |
-| ADC rate delle catture | `CAPTURE_ADC_RATE` in `measure.py` |
+| Tolleranza dell'analisi | valori di default di `AnalysisConfig` in `analyzer.py` |
+| Riconoscimento del movimento (soglia dei picchi, movimento minimo, riposo finale) | `PEAK_THRESHOLD_FRACTION`, `MIN_MOVEMENT_S`, `MIN_IDLE_S` in `analyzer.py` |
+| ADC rate di default delle catture | `CAPTURE_ADC_RATE` in `measure.py` |
 | Funzioni ammesse nella cattura | `CAPTURE_FUNCTION_REPLIES` in `capture.py` |
 | Letture fallite che fermano una cattura | `DEFAULT_MAX_CONSECUTIVE_FAILURES` in `capture.py` |
 | Tempo a riposo che chiude una cattura `--auto` | `STOP_HOLD_S` in `stop_detector.py` |
@@ -233,17 +237,17 @@ Le docstring di ogni modulo sono il riferimento per argomenti, valori restituiti
 
 `python -m pytest -q` esegue tutti i test, compresi quelli che attendono il timeout di connessione su un indirizzo irraggiungibile.
 
-- L'analyzer è verificato sulla simulazione fisica (`simulation.py`, `scenarios.py`: riposo, spunto, ripple di passo, carico PWM, corrente di mantenimento, assestamento lento, aliasing, a ogni ADC rate) e su casi limite costruiti a mano. La regola verificata dai test: una cattura restituisce il valore giusto oppure un errore esplicito, mai un valore sbagliato.
+- L'analyzer è verificato sulle catture di laboratorio (`tests/data/lab`: il dispositivo vero in SLOW), sulla simulazione fisica (`simulation.py`, `scenarios.py`: la stessa sequenza a ogni ADC rate) e su casi limite costruiti a mano. La regola verificata dai test: una cattura restituisce il valore giusto oppure un errore esplicito, mai un valore sbagliato.
 - I test del grafico coprono il contenuto della pagina e l'invio live su una vera connessione locale.
 - La CI verifica che, nell'eseguibile compilato, il processo della finestra live apra una finestra WebView2. L'aspetto della finestra si può verificare solo su un PC Windows.
 
 ### Scelte di progetto
 
-- **Media di tutto il regime.** Con ripple o carico variabile, il dato utile è l'assorbimento medio durante il funzionamento, non il tratto più piatto.
-- **Un errore piuttosto che un numero sbagliato.** Ogni controllo (riposo all'inizio, un solo regime, blocchi stabili, precisione, nessuna lettura non valida nella finestra) scarta la cattura indicando il motivo, invece di restituire un valore potenzialmente sbagliato.
-- **Sempre SLOW, senza effetti collaterali.** SLOW è l'unico rate con accuratezza specificata e media il ripple dello stepper dentro ogni conversione; la cattura ripristina il rate precedente, così le letture singole successive mantengono le loro impostazioni.
-- **Media pesata nel tempo.** L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi se lo si interroga più velocemente dell'ADC i valori si ripetono; pesando ogni lettura per il tempo fino alla successiva, il risultato non dipende dalla frequenza di interrogazione.
-- **Le letture fallite restano nei dati come NaN.** Scartarle nasconderebbe i picchi in overflow e falserebbe la media verso il basso.
+- **Solo il movimento.** I picchi del deltastep sono un altro carico e il riposo non è il movimento: conta solo il livello che sta in mezzo. Le conversioni agli estremi del movimento sono escluse perché ciascuna fa la media tra il movimento e quello che c'era prima o dopo.
+- **Un errore piuttosto che un numero sbagliato.** Ogni controllo (riposo alla fine, un solo movimento, almeno 0.3 s, precisione) scarta la cattura indicando il motivo, invece di restituire un valore potenzialmente sbagliato.
+- **SLOW di default, senza effetti collaterali.** SLOW è l'unico rate con accuratezza specificata e media il ripple dello stepper dentro ogni conversione; `--rate MED` rinuncia a questo in cambio del doppio delle conversioni sui movimenti brevi. La cattura ripristina il rate precedente, così le letture singole successive mantengono le loro impostazioni.
+- **Una conversione, un valore.** L'HMC8012 risponde a `READ?` con l'ultima conversione, quindi se lo si interroga più velocemente dell'ADC i valori si ripetono; l'analisi li unisce, così il risultato non dipende dalla frequenza di interrogazione.
+- **Le letture fallite restano nei dati come NaN e contano come picchi.** Una lettura mancante accanto al movimento non viene mai presa per una sua parte.
 - **La diagnostica non cambia mai l'esito.** Grafico, finestra live e file delle letture ricevono letture ed esito anche quando la cattura fallisce, ma `result.txt` non li aspetta e non dipende da loro.
 
 ### Note sullo strumento
@@ -287,7 +291,7 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
   --nofollow-import-to=pyvisa.testsuite --nofollow-import-to=pyvisa_py.testsuite ^
   --noinclude-pytest-mode=nofollow ^
   --product-name=hmc8012-measure --file-description="HMC8012 measurement CLI" ^
-  --file-version=4.0.0 --product-version=4.0.0 ^
+  --file-version=4.1.0 --product-version=4.1.0 ^
   measure.py
 ```
 
