@@ -13,7 +13,7 @@ from analyzer import RUN_THRESHOLD_TOLERANCES, AnalysisConfig
 
 # Seconds of continuous idle after a run that end the capture. Longer than the
 # pauses inside one movement (under about 1 s), so a pause does not stop it.
-# TODO(Yarin, 2026-10-02): Tune on the lab recordings of real movements.
+# Still to tune on lab recordings of real movements.
 STOP_HOLD_S = 3.0
 # Seconds of continuous running before a return to idle can stop the capture.
 MIN_RUN_S = 0.5

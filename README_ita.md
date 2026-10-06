@@ -2,7 +2,9 @@
 
 Strumento a riga di comando per il multimetro digitale Rohde & Schwarz HMC8012, pensato per essere lanciato da un programma host (una macro VBA). A ogni chiamata esegue un solo comando, scrive l'esito in `result.txt` nella cartella dell'eseguibile e termina. Oltre alle letture singole, la cattura (`--time` o `--auto`) registra la corrente assorbita dal dispositivo e restituisce la corrente media del movimento compreso tra i picchi del deltastep, escludendo i picchi, il riposo e le letture a cavallo dell'inizio e della fine del movimento. Con `--auto` la cattura si ferma da sola quando il dispositivo si è fermato. Su richiesta mostra anche il grafico della cattura, in tempo reale in una piccola finestra oppure salvato in un file HTML.
 
-English version: [README.md](README.md).
+English version: [README.md](README.md). Le modifiche versione per versione: [CHANGELOG.md](CHANGELOG.md), in inglese.
+
+Autore: Yarin Cardillo.
 
 ## Avvio rapido
 
@@ -299,6 +301,8 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
 ```
 
 Usare in `--file-version` e `--product-version` la versione di `version.py`.
+
+Un rilascio si fa così: si incrementa `version.py`, si aggiunge la versione a `CHANGELOG.md`, si eseguono i test, si fa il commit, lo si etichetta `vX.Y.Z` e si compila `hmc.exe` come sopra. Se la repository è su GitHub, a ogni push su `master` il workflow `.github/workflows/build-windows.yml` esegue i test, compila `hmc.exe`, lo prova su un runner Windows e lo conserva tra gli artefatti dell'esecuzione; altrove si eseguono i comandi sopra su un PC Windows.
 
 ## Dipendenze
 

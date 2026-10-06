@@ -2,7 +2,9 @@
 
 Command-line tool for the Rohde & Schwarz HMC8012 digital multimeter, called by a host program (a VBA macro). Each call does one job, writes its outcome to `result.txt` next to the executable, and exits. Besides single readings, a capture (`--time` or `--auto`) records the supply current of the device and reports the mean current of the movement between its deltastep peaks, leaving out the peaks, the idle and the readings that straddle the movement's start and stop. With `--auto` the capture stops by itself once the motor has stopped. On request it also draws the capture, live in a compact window or saved as a page.
 
-Italian version: [README_ita.md](README_ita.md).
+Italian version: [README_ita.md](README_ita.md). Changes by version: [CHANGELOG.md](CHANGELOG.md).
+
+Author: Yarin Cardillo.
 
 ## Quick start
 
@@ -299,6 +301,8 @@ python -m nuitka --onefile --assume-yes-for-downloads --output-filename=hmc.exe 
 ```
 
 Use the version from `version.py` in `--file-version` and `--product-version`.
+
+A release goes like this: bump `version.py`, add the version to `CHANGELOG.md`, run the tests, commit, tag the commit `vX.Y.Z` and build `hmc.exe` as above. When the repository is hosted on GitHub, `.github/workflows/build-windows.yml` runs the tests, builds `hmc.exe`, checks it on a Windows runner and keeps it as an artifact of the run, at every push to `master`; elsewhere the commands above on a Windows PC do the same.
 
 ## Dependencies
 
